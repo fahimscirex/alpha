@@ -16,8 +16,7 @@ import me.shovon.bdparser.SmsFilter
 import me.shovon.bdparser.ParsedTransaction
 import me.shovon.bdparser.TransactionType
 import java.math.BigDecimal
-import java.time.LocalDate
-import java.time.LocalDateTime
+import me.shovon.bdparser.SimpleDate
 
 /**
  * Base class for bank-specific message parsers.
@@ -51,7 +50,7 @@ abstract class BankParser {
      * Returns the currency used by this bank.
      * Defaults to INR for Indian banks. International banks should override this.
      */
-    open fun getCurrency(): String = "INR"
+    open fun getCurrency(): String = "BDT"
 
     /**
      * True when a regular (non-statement) card transaction SMS from this bank reports the
@@ -113,7 +112,6 @@ abstract class BankParser {
             val bankName: String,
             val accountLast4: String,
             val balance: BigDecimal,
-            val asOfDate: LocalDateTime? = null,
             /** true when the balance figure represents CC outstanding (Total Amount Due) */
             val isCreditCard: Boolean = false,
             /** Total credit card limit, when the message exposes it (not the remaining/available limit). */
@@ -123,9 +121,9 @@ abstract class BankParser {
             /** Minimum amount due on a credit card statement. */
             val minDue: BigDecimal? = null,
             /** Date by which [totalDue]/[minDue] must be paid to avoid late fees/interest. */
-            val dueDate: LocalDate? = null,
+            val dueDate: SimpleDate? = null,
             /** Billing-cycle date the statement was generated for (e.g. first of the billing month). */
-            val statementDate: LocalDate? = null
+            val statementDate: SimpleDate? = null
         )
     }
 
@@ -177,6 +175,7 @@ abstract class BankParser {
             bankName = getBankName(),
             isFromCard = detectIsCard(smsBody),
             currency = getCurrency(),
+            fee = extractFee(smsBody)?.takeIf { it.signum() > 0 },
             creditCardBalanceIsAvailableCredit = creditCardBalanceIsAvailableCredit()
         )
     }
@@ -187,6 +186,9 @@ abstract class BankParser {
      *
      * Subclasses should override this to add bank-specific detection.
      */
+    /** Fee charged on top of the amount, for formats that report one. */
+    protected open fun extractFee(message: String): BigDecimal? = null
+
     open fun isBalanceUpdateNotification(message: String): Boolean = false
 
     /**
@@ -449,9 +451,11 @@ abstract class BankParser {
     /**
      * Extracts last 4 digits from a raw captured string.
      * Filters to digits only, takes last 4. Returns null if fewer than 3 digits.
+     * Only digits after the last mask character count: "134***982" is "982", not "4982".
      */
     protected fun extractLast4Digits(raw: String): String? {
-        val digits = raw.filter { it.isDigit() }
+        val digits = raw.substringAfterLast('*').substringAfterLast('X').substringAfterLast('x')
+            .filter { it.isDigit() }
         val last4 = digits.takeLast(4)
         return if (last4.length >= 3) last4 else null
     }

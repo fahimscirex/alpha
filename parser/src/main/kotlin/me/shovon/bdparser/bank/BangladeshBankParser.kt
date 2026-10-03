@@ -10,6 +10,7 @@
  */
 package me.shovon.bdparser.bank
 
+import me.shovon.bdparser.ParsedTransaction
 import java.math.BigDecimal
 
 /**
@@ -46,6 +47,21 @@ import java.math.BigDecimal
 abstract class BangladeshBankParser : BankParser() {
 
     override fun getCurrency(): String = "BDT"
+
+    /**
+     * Every amount pattern in the bank parsers assumes taka, so a card alert for a foreign
+     * purchase ("USD 12.99 ...") must not parse at all rather than record dollars as taka.
+     * Callers keep unparsed SMS from known senders for review.
+     */
+    override fun parse(smsBody: String, sender: String, timestamp: Long): ParsedTransaction? {
+        if (foreignAmountPattern.containsMatchIn(smsBody)) return null
+        return super.parse(smsBody, sender, timestamp)
+    }
+
+    private val foreignAmountPattern = Regex(
+        """\b(?:USD|EUR|GBP|AED|SAR|QAR|KWD|OMR|MYR|SGD|INR|CAD|AUD|JPY|CNY|THB)\s*[0-9]""",
+        RegexOption.IGNORE_CASE
+    )
 
     /**
      * Brand/channel words that identify this bank when they appear in the message BODY, e.g.

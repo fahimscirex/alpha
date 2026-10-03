@@ -13,7 +13,7 @@ package me.shovon.bdparser.bank
 import me.shovon.bdparser.TransactionType
 import me.shovon.bdparser.bank.BankParser.Companion.BalanceUpdateInfo
 import java.math.BigDecimal
-import java.time.LocalDate
+import me.shovon.bdparser.SimpleDate
 
 /**
  * Parser for Mutual Trust Bank Limited (MTB, Bangladesh) SMS messages.
@@ -248,9 +248,9 @@ class MutualTrustBankParser : BangladeshBankParser() {
         val dueMonth = parseMonthAbbreviation(match.groupValues[7])
         val dueYear = match.groupValues[8].toIntOrNull()
 
-        val statementDate = runCatching { LocalDate.of(statementYear, statementMonth, 1) }.getOrNull()
+        val statementDate = SimpleDate.ofOrNull(statementYear, statementMonth, 1)
         val dueDate = if (dueDay != null && dueMonth != null && dueYear != null) {
-            runCatching { LocalDate.of(dueYear, dueMonth, dueDay) }.getOrNull()
+            SimpleDate.ofOrNull(dueYear, dueMonth, dueDay)
         } else null
 
         return BalanceUpdateInfo(

@@ -13,7 +13,7 @@ package me.shovon.bdparser.bank
 import me.shovon.bdparser.TransactionType
 import me.shovon.bdparser.bank.BankParser.Companion.BalanceUpdateInfo
 import java.math.BigDecimal
-import java.time.LocalDate
+import me.shovon.bdparser.SimpleDate
 
 /**
  * Parser for Eastern Bank Limited (EBL, Bangladesh) SMS messages.
@@ -22,12 +22,14 @@ import java.time.LocalDate
  * BDT X as <reason> on <date> <time> [BST]" form, and a card-level "EBL CARDS: ..." form.
  *
  * Supported formats:
- * - "AC <masked> is credited with BDT X as NPSB FUND TRANSFER on <date> <time> [BST]"
- * - "AC <masked> is debited with BDT X as EBL Account Transfer on <date> <time> [BST]"
- * - "AC <masked> is debited with BDT X as EBL Skybanking MFS Transfer-bKash on <date> <time> [BST]"
- * - "EBL CARDS: NPSB Fund Transfer BDT X using Card <masked> on <date> <time> [BST]"
- * - "EBL CARDS: Payment of BDT X credited to Card <masked> on <date> <time> [BST]. Balance: BDT Y."
- * - "EBL CARDS: Purchase txn BDT X from <merchant>. Card <masked> on <date> <time> [BST]. Balance: BDT Y."
+ * - "AC <masked> is {credited|debited} with BDT X as <reason> on <date> <time> [BST] [Balance is BDT Y]"
+ *   for any reason (NPSB FUND TRANSFER, EBL Account Transfer, EBL Skybanking MFS Transfer-bKash,
+ *   IC INTEREST LIQUIDATION, WITHOLDING SOURCE TAX ON CASA ACCOUNTS, ...)
+ * - "[EBL CARDS: ]NPSB Fund Transfer BDT X using Card <masked> on <date> <time> [BST]"
+ * - "[EBL CARDS: ]Payment of BDT X credited to Card <masked> on <date> <time> [BST]. Balance: BDT Y."
+ * - "[EBL CARDS: ]Purchase txn BDT X from <merchant>. Card <masked> on <date> <time> [BST]. Balance: BDT Y."
+ * - "Purchase txn BDT X from <merchant> <terminal>.Card <n> on <date> ... Your A/C <n> Balance BDT Y." (debit card)
+ * - "QR txn BDT X through EBL Skybanking at <merchant> from Card <masked> on <date> ..."
  *
  * The trailing "Balance: BDT Y" is parsed into [me.shovon.bdparser.ParsedTransaction.balance]
  * on BOTH the payment-credited and purchase shapes: real-world reconciliation (credit limit minus
@@ -97,39 +99,39 @@ class EasternBankParser : BangladeshBankParser() {
 
     private val takaFigure = """([0-9][0-9,]*(?:\.\d{1,2})?)"""
 
-    // "AC <masked> is credited with BDT X as NPSB FUND TRANSFER on ..."
-    private val npsbCreditPattern = Regex(
-        """AC\s+[0-9*]+\s+is credited with BDT\s*$takaFigure\s+as\s+NPSB FUND TRANSFER""",
+    // "AC <masked> is {credited|debited} with BDT X as <reason> on <date> ... [Balance is BDT Y]"
+    // One pattern for every reason (transfers, interest, tax, ...); the reason becomes the merchant.
+    private val accountPattern = Regex(
+        """AC\s+[0-9*]+\s+is (credited|debited) with BDT\s*$takaFigure\s+as\s+(.+?)\s+on\s+\d""",
         RegexOption.IGNORE_CASE
     )
+    private val accountBalanceSuffix = Regex("""Balance is BDT\s*$takaFigure""", RegexOption.IGNORE_CASE)
 
-    // "AC <masked> is debited with BDT X as EBL Account Transfer on ..."
-    private val accountTransferDebitPattern = Regex(
-        """AC\s+[0-9*]+\s+is debited with BDT\s*$takaFigure\s+as\s+EBL Account Transfer""",
-        RegexOption.IGNORE_CASE
-    )
+    // The card shapes below come with or without the "EBL CARDS:" prefix.
+    private val cardsPrefix = """(?:EBL CARDS:\s*)?"""
 
-    // "AC <masked> is debited with BDT X as EBL Skybanking MFS Transfer-bKash on ..."
-    private val skybankingBkashDebitPattern = Regex(
-        """AC\s+[0-9*]+\s+is debited with BDT\s*$takaFigure\s+as\s+EBL Skybanking MFS Transfer-?\s*bKash""",
-        RegexOption.IGNORE_CASE
-    )
-
-    // "EBL CARDS: NPSB Fund Transfer BDT X using Card <masked> on ..."
+    // "NPSB Fund Transfer BDT X using Card <masked> on ..."
     private val cardsNpsbPattern = Regex(
-        """EBL CARDS:\s*NPSB Fund Transfer\s+BDT\s*$takaFigure\s+using Card\s+[0-9*]+""",
+        """${cardsPrefix}NPSB Fund Transfer\s+BDT\s*$takaFigure\s+using Card\s+[0-9*]+""",
         RegexOption.IGNORE_CASE
     )
 
-    // "EBL CARDS: Payment of BDT X credited to Card <masked> on ... Balance: BDT Y."
+    // "Payment of BDT X credited to Card <masked> on ... Balance: BDT Y."
     private val cardsPaymentCreditedPattern = Regex(
-        """EBL CARDS:\s*Payment\s+of\s+BDT\s*$takaFigure\s+credited to Card\s+[0-9*]+""",
+        """${cardsPrefix}Payment\s+of\s+BDT\s*$takaFigure\s+credited to Card\s+[0-9*]+""",
         RegexOption.IGNORE_CASE
     )
 
-    // "EBL CARDS: Purchase txn BDT X from <merchant>. Card <masked> on ... Balance: BDT Y."
+    // "Purchase txn BDT X from <merchant>. Card <masked> on ... Balance: BDT Y."            (credit card)
+    // "Purchase txn BDT X from <merchant> <terminal>.Card <n> on ... Your A/C <n> Balance BDT Y." (debit card)
     private val cardsPurchasePattern = Regex(
-        """EBL CARDS:\s*Purchase txn\s+BDT\s*$takaFigure\s+from\s+(.+?)\.\s*Card\s+[0-9*]+""",
+        """${cardsPrefix}Purchase txn\s+BDT\s*$takaFigure\s+from\s+(.+?)\.\s*Card\s+[0-9*]+""",
+        RegexOption.IGNORE_CASE
+    )
+
+    // "QR txn BDT X through EBL Skybanking at <merchant> from Card <masked> on ..."
+    private val cardsQrPattern = Regex(
+        """QR txn\s+BDT\s*$takaFigure\s+through\s+.+?\s+at\s+(.+?)\s+from Card\s+[0-9*]+""",
         RegexOption.IGNORE_CASE
     )
 
@@ -138,39 +140,61 @@ class EasternBankParser : BangladeshBankParser() {
         RegexOption.IGNORE_CASE
     )
 
+    // Debit-card purchases report the linked account's balance, not available credit.
+    private val linkedAccountBalanceSuffix = Regex(
+        """A/C\s+[0-9*]+\s+Balance\s+BDT\s*$takaFigure""",
+        RegexOption.IGNORE_CASE
+    )
+
+    // Purchase merchants carry a trailing terminal id: "btcl.gov.bd 024831".
+    private val trailingTerminalId = Regex("""\s+\d+$""")
+
     private data class Match(
         val amount: String,
         val type: TransactionType,
         val merchant: String?,
-        val hasCardBalance: Boolean
+        val balance: String?
     )
 
     private fun match(message: String): Match? {
-        npsbCreditPattern.find(message)?.let {
-            return Match(it.groupValues[1], TransactionType.INCOME, "NPSB Fund Transfer", false)
-        }
-        accountTransferDebitPattern.find(message)?.let {
-            return Match(it.groupValues[1], TransactionType.EXPENSE, "EBL Account Transfer", false)
-        }
-        skybankingBkashDebitPattern.find(message)?.let {
-            return Match(it.groupValues[1], TransactionType.EXPENSE, "bKash", false)
+        accountPattern.find(message)?.let {
+            val type = if (it.groupValues[1].equals("credited", ignoreCase = true)) {
+                TransactionType.INCOME
+            } else {
+                TransactionType.EXPENSE
+            }
+            val reason = it.groupValues[3].trim()
+            val merchant = when {
+                reason.equals("NPSB FUND TRANSFER", ignoreCase = true) -> "NPSB Fund Transfer"
+                reason.contains("bKash", ignoreCase = true) -> "bKash"
+                else -> reason
+            }
+            val balance = accountBalanceSuffix.find(message)?.groupValues?.get(1)
+            return Match(it.groupValues[2], type, merchant, balance)
         }
         cardsNpsbPattern.find(message)?.let {
-            return Match(it.groupValues[1], TransactionType.EXPENSE, "NPSB Fund Transfer", false)
+            return Match(it.groupValues[1], TransactionType.EXPENSE, "NPSB Fund Transfer", null)
         }
         cardsPaymentCreditedPattern.find(message)?.let {
-            // hasCardBalance=true: the trailing "Balance: BDT Y" on this payment-credited shape
-            // reports the card's remaining AVAILABLE CREDIT, same semantic as the purchase shape
-            // below - confirmed by reconciling credit limit minus this balance against a known
-            // payment amount. Unlike EBL, MutualTrustBankParser's equivalent payment patterns
-            // still map to BalanceKind.NONE since MTB's payment-balance semantic is unconfirmed.
-            return Match(it.groupValues[1], TransactionType.INCOME, null, true)
+            // The trailing "Balance: BDT Y" on this payment-credited shape reports the card's
+            // remaining AVAILABLE CREDIT, same semantic as the purchase shape below - confirmed
+            // by reconciling credit limit minus this balance against a known payment amount.
+            // Unlike EBL, MutualTrustBankParser's equivalent payment patterns still map to
+            // BalanceKind.NONE since MTB's payment-balance semantic is unconfirmed.
+            return Match(it.groupValues[1], TransactionType.INCOME, null, cardBalance(message))
         }
         cardsPurchasePattern.find(message)?.let {
-            return Match(it.groupValues[1], TransactionType.EXPENSE, it.groupValues[2].trim(), true)
+            val merchant = it.groupValues[2].trim().replace(trailingTerminalId, "")
+            return Match(it.groupValues[1], TransactionType.EXPENSE, merchant, cardBalance(message))
+        }
+        cardsQrPattern.find(message)?.let {
+            return Match(it.groupValues[1], TransactionType.EXPENSE, it.groupValues[2].trim(), null)
         }
         return null
     }
+
+    private fun cardBalance(message: String): String? =
+        (linkedAccountBalanceSuffix.find(message) ?: cardsBalanceSuffix.find(message))?.groupValues?.get(1)
 
     override fun isTransactionMessage(message: String): Boolean {
         if (match(message) != null) return true
@@ -180,11 +204,8 @@ class EasternBankParser : BangladeshBankParser() {
     override fun extractAmount(message: String): BigDecimal? =
         match(message)?.let { parseTakaAmount(it.amount) }
 
-    override fun extractBalance(message: String): BigDecimal? {
-        val m = match(message) ?: return null
-        if (!m.hasCardBalance) return null
-        return cardsBalanceSuffix.find(message)?.let { parseTakaAmount(it.groupValues[1]) }
-    }
+    override fun extractBalance(message: String): BigDecimal? =
+        match(message)?.balance?.let { parseTakaAmount(it) }
 
     override fun extractTransactionType(message: String): TransactionType? = match(message)?.type
 
@@ -218,9 +239,9 @@ class EasternBankParser : BangladeshBankParser() {
         val dueMonth = parseMonthAbbreviation(match.groupValues[7])
         val dueYear = resolveYear(match.groupValues[8])
 
-        val statementDate = runCatching { LocalDate.of(statementYear, statementMonth, 1) }.getOrNull()
+        val statementDate = SimpleDate.ofOrNull(statementYear, statementMonth, 1)
         val dueDate = if (dueDay != null && dueMonth != null && dueYear != null) {
-            runCatching { LocalDate.of(dueYear, dueMonth, dueDay) }.getOrNull()
+            SimpleDate.ofOrNull(dueYear, dueMonth, dueDay)
         } else null
 
         return BalanceUpdateInfo(

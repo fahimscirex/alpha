@@ -21,3 +21,17 @@ Modifications made in this work, on 2026-09-01:
 
 As required by the AGPL, this work is also licensed under the GNU Affero
 General Public License version 3. See LICENSE for the full text.
+
+Further modifications for the alpha budget app (github.com/fahimscirex/alpha), on 2026-10-03:
+  - Replaced java.time.LocalDate with SimpleDate so the parsers run on Android 7
+    (API 24); dropped the unused BalanceUpdateInfo.asOfDate.
+  - Defaulted BankParser.getCurrency() to BDT instead of INR.
+  - Bank parsers reject SMS quoting a foreign-currency amount instead of
+    recording it as taka.
+  - Masked account numbers keep only the digits after the mask ("134***982"
+    is "982", not "4982").
+  - Eastern Bank: one pattern for every account credit/debit reason, with the
+    "Balance is BDT Y" balance; card alerts with or without the "EBL CARDS:"
+    prefix; debit-card purchases with the linked account balance; QR payments.
+  - MFS fees surfaced as ParsedTransaction.fee.
+  - Added RealSampleTest with real EBL and bKash messages (numbers replaced).

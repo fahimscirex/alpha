@@ -168,10 +168,9 @@ abstract class BangladeshMfsParser : BankParser() {
 
     /**
      * Extracts the transaction fee, e.g. "Fee Tk 18.50" / "Fee: Tk0.00".
-     * Not currently surfaced on [me.shovon.bdparser.ParsedTransaction], but kept as a
-     * shared helper for subclasses/future use and to make the fee-exclusion behaviour testable.
+     * Surfaced as [me.shovon.bdparser.ParsedTransaction.fee] when non-zero.
      */
-    protected fun extractFee(message: String): BigDecimal? {
+    override fun extractFee(message: String): BigDecimal? {
         CompiledPatterns.TakaFee.FEE_LABEL.find(message)?.let { match ->
             return parseTakaAmount(match.groupValues[1])
         }

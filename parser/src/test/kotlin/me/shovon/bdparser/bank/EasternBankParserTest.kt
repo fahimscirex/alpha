@@ -22,7 +22,7 @@ import org.junit.jupiter.api.DynamicTest
 import org.junit.jupiter.api.DynamicTest.dynamicTest
 import org.junit.jupiter.api.TestFactory
 import java.math.BigDecimal
-import java.time.LocalDate
+import me.shovon.bdparser.SimpleDate
 
 class EasternBankParserTest {
 
@@ -203,8 +203,8 @@ class EasternBankParserTest {
                 assertEquals(BigDecimal("10000.00"), info.balance)
                 assertEquals(BigDecimal("10000.00"), info.totalDue)
                 assertEquals(BigDecimal("1000.00"), info.minDue)
-                assertEquals(LocalDate.of(2020, 1, 1), info.dueDate)
-                assertEquals(LocalDate.of(2020, 1, 1), info.statementDate)
+                assertEquals(SimpleDate(2020, 1, 1), info.dueDate)
+                assertEquals(SimpleDate(2020, 1, 1), info.statementDate)
                 assertNull(info.creditLimit)
             },
             dynamicTest("Non-statement message is not a balance update") {
