@@ -1,0 +1,36 @@
+package com.fahimscirex.alpha.sms
+
+import android.content.Context
+import android.provider.Telephony
+import com.fahimscirex.alpha.data.AppDb
+
+/**
+ * Catches up on SMS the receiver missed (app force-stopped, or sent before install).
+ * Reads only messages newer than the last scan; the first scan goes back [FIRST_SCAN_DAYS].
+ */
+object InboxScan {
+    private const val FIRST_SCAN_DAYS = 180L
+    private const val PREFS = "scan"
+    private const val KEY_LAST = "last"
+
+    suspend fun run(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val since = prefs.getLong(KEY_LAST, System.currentTimeMillis() - FIRST_SCAN_DAYS * 86_400_000L)
+        val dao = AppDb.get(context).dao()
+        var last = since
+        context.contentResolver.query(
+            Telephony.Sms.Inbox.CONTENT_URI,
+            arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE),
+            "${Telephony.Sms.DATE} > ?", arrayOf(since.toString()),
+            "${Telephony.Sms.DATE} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) {
+                val sender = c.getString(0) ?: continue
+                val body = c.getString(1) ?: continue
+                last = c.getLong(2)
+                Ingest.sms(dao, sender, body, last)
+            }
+        }
+        prefs.edit().putLong(KEY_LAST, last).apply()
+    }
+}
