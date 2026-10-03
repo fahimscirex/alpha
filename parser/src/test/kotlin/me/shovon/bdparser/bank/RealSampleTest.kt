@@ -57,6 +57,14 @@ class RealSampleTest {
     }
 
     @Test
+    fun `EBL debit card purchase names the card linked to the account`() {
+        val t = parse("EBL", "Purchase txn BDT 100 from btcl.gov.bd 024831.Card 4520170001 on 29-Sep-26 11:55:40 AM BST.Your A/C 1230456 Balance BDT 45119.59. EBL Helpline 16230")!!
+        assertEquals("0456", t.accountLast4)
+        assertEquals("0001", t.cardLast4)
+        assertNull(parse("EBL", "QR txn BDT 20 through EBL Skybanking at BANGLA QR PAYMENT  from Card 452017**0001 on 01-Oct-26 01:42:16 PM BST. EBL Helpline 16230")!!.cardLast4)
+    }
+
+    @Test
     fun `bKash alerts parse with non-zero fees surfaced`() {
         check("bKash", "You have received deposit from iBanking of Tk 1,000.00 from Eastern Bank PLC. Internet Banking. Fee Tk 0.00. Balance Tk 1,186.62. TrxID AAA0000001 at 25/02/2026 16:07",
             INCOME, "1000.00", "Eastern Bank PLC", null, "1186.62")

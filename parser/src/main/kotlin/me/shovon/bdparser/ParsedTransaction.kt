@@ -33,6 +33,8 @@ data class ParsedTransaction(
     val toAccount: String? = null,
     /** Fee charged on top of [amount] (e.g. bKash cash out / send money); null when none. */
     val fee: BigDecimal? = null,
+    /** Card digits when the SMS names both a card and the account it debits; null otherwise. */
+    val cardLast4: String? = null,
     /**
      * True when [balance] - as reported by a regular (non-statement) card transaction SMS -
      * represents the card's remaining AVAILABLE CREDIT rather than the outstanding amount owed.

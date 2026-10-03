@@ -11,6 +11,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -25,6 +27,11 @@ data class Account(
     val currency: String = "BDT",
     val balance: Long? = null,
     val balanceAt: Long = 0,
+    /**
+     * Set when this row is another view of [mergedInto] (e.g. a debit card of a bank account).
+     * The row is kept so later SMS naming this number still resolve to the target account.
+     */
+    val mergedInto: Long? = null,
 )
 
 @Entity(indices = [Index(value = ["hash"], unique = true), Index("timestamp")])
@@ -40,6 +47,8 @@ data class Txn(
     val timestamp: Long,
     val source: String,
     val note: String? = null,
+    /** Id of the other half when this is one side of a transfer between own accounts. */
+    val transferOf: Long? = null,
 )
 
 /** SMS from a known sender that looked financial but failed to parse; shown for parser fixes. */
@@ -59,12 +68,39 @@ data class TxnRow(
     val timestamp: Long,
     val provider: String,
     val number: String,
+    val transferOf: Long?,
 )
+
+/** A transfer candidate: an unlinked transaction plus its account's provider. */
+data class TxnSide(val id: Long, val amount: Long, val merchant: String?, val timestamp: Long, val provider: String)
 
 @Dao
 interface MoneyDao {
     @Query("SELECT * FROM Account WHERE provider = :provider")
     suspend fun accounts(provider: String): List<Account>
+
+    @Query("SELECT * FROM Account WHERE id = :id")
+    suspend fun account(id: Long): Account
+
+    /** Accounts as shown to the user: merged rows are folded into their target. */
+    @Query("SELECT * FROM Account WHERE mergedInto IS NULL ORDER BY provider, number")
+    fun visibleAccounts(): Flow<List<Account>>
+
+    @Query("UPDATE Txn SET accountId = :into WHERE accountId = :from")
+    suspend fun moveTxns(from: Long, into: Long)
+
+    @Query("UPDATE Account SET mergedInto = :into WHERE id = :from OR mergedInto = :from")
+    suspend fun setMergedInto(from: Long, into: Long)
+
+    @Query(
+        """SELECT t.id, t.amount, t.merchant, t.timestamp, a.provider FROM Txn t JOIN Account a ON a.id = t.accountId
+           WHERE t.amount = :amount AND t.currency = :currency AND t.accountId != :accountId
+             AND t.transferOf IS NULL AND t.hash NOT LIKE '%:fee' AND t.timestamp BETWEEN :from AND :to"""
+    )
+    suspend fun transferCandidates(amount: Long, currency: String, accountId: Long, from: Long, to: Long): List<TxnSide>
+
+    @Query("UPDATE Txn SET transferOf = CASE id WHEN :a THEN :b ELSE :a END WHERE id IN (:a, :b)")
+    suspend fun linkTransfer(a: Long, b: Long)
 
     @Insert
     suspend fun insert(account: Account): Long
@@ -80,28 +116,36 @@ interface MoneyDao {
     suspend fun insert(sms: UnparsedSms): Long
 
     @Query(
-        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number
+        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf
            FROM Txn t JOIN Account a ON a.id = t.accountId
            WHERE t.timestamp >= :from AND t.timestamp < :to ORDER BY t.timestamp DESC"""
     )
     fun txns(from: Long, to: Long): Flow<List<TxnRow>>
 
-    @Query("SELECT COALESCE(SUM(-amount), 0) FROM Txn WHERE amount < 0 AND currency = 'BDT' AND timestamp >= :from AND timestamp < :to")
+    @Query("SELECT COALESCE(SUM(-amount), 0) FROM Txn WHERE amount < 0 AND transferOf IS NULL AND currency = 'BDT' AND timestamp >= :from AND timestamp < :to")
     fun spent(from: Long, to: Long): Flow<Long>
 
     @Query("SELECT COUNT(*) FROM UnparsedSms")
     fun unparsedCount(): Flow<Int>
 }
 
-@Database(entities = [Account::class, Txn::class, UnparsedSms::class], version = 1, exportSchema = false)
+@Database(entities = [Account::class, Txn::class, UnparsedSms::class], version = 2, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): MoneyDao
 
     companion object {
         @Volatile private var instance: AppDb? = null
 
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE Account ADD COLUMN mergedInto INTEGER")
+                db.execSQL("ALTER TABLE Txn ADD COLUMN transferOf INTEGER")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "alpha.db")
+                .addMigrations(MIGRATION_1_2)
                 .build().also { instance = it }
         }
     }

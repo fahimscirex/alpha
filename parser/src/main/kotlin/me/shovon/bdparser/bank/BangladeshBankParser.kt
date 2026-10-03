@@ -156,6 +156,11 @@ abstract class BangladeshBankParser : BankParser() {
         return null
     }
 
+    override fun extractLinkedCardLast4(message: String): String? {
+        if (!bankAccountMaskPattern.containsMatchIn(message)) return null
+        return bankCardMaskPattern.find(message)?.let { extractLast4Digits(it.groupValues[1]) }
+    }
+
     override fun detectIsCard(message: String): Boolean {
         val hasAccount = bankAccountMaskPattern.containsMatchIn(message)
         val hasCard = bankCardMaskPattern.containsMatchIn(message)

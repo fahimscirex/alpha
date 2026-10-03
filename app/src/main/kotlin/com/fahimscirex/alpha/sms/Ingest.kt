@@ -39,9 +39,12 @@ object Ingest {
             }
         }
         val account = account(dao, t.bankName, t.accountLast4.orEmpty(), t.currency)
+        t.cardLast4?.let { linkCard(dao, t.bankName, it, account) }
         val hash = t.generateTransactionId()
-        dao.insert(Txn(hash = hash, accountId = account.id, amount = sign * minor(t.amount), currency = t.currency,
-            merchant = t.merchant, timestamp = timestamp, source = "SMS"))
+        val txn = Txn(hash = hash, accountId = account.id, amount = sign * minor(t.amount), currency = t.currency,
+            merchant = t.merchant, timestamp = timestamp, source = "SMS")
+        val id = dao.insert(txn)
+        if (id > 0) linkTransfer(dao, txn.copy(id = id), account.provider)
         t.fee?.let {
             dao.insert(Txn(hash = "$hash:fee", accountId = account.id, amount = -minor(it), currency = t.currency,
                 merchant = "${t.bankName} fee", timestamp = timestamp, source = "SMS"))
@@ -52,19 +55,62 @@ object Ingest {
         }
     }
 
-    /**
-     * Finds the provider's account by number suffix, since one bank shows the same account as
-     * "134***982" in one SMS and "1343982" in another (parsed as "982" and "3982").
-     */
-    private suspend fun account(dao: MoneyDao, provider: String, number: String, currency: String): Account {
-        val existing = dao.accounts(provider).firstOrNull {
-            it.currency == currency && (it.number == number ||
-                (number.length >= 3 && it.number.length >= 3 && (it.number.endsWith(number) || number.endsWith(it.number))))
-        }
-        if (existing != null) return existing
-        val created = Account(provider = provider, number = number, currency = currency)
-        return created.copy(id = dao.insert(created))
+    /** Merges [from] into [into]: its transactions move over and its number resolves to [into] from now on. */
+    suspend fun merge(dao: MoneyDao, from: Account, into: Account) = lock.withLock { mergeLocked(dao, from, into) }
+
+    private suspend fun mergeLocked(dao: MoneyDao, from: Account, into: Account) {
+        if (from.id == into.id) return
+        dao.moveTxns(from.id, into.id)
+        dao.setMergedInto(from.id, into.id)
     }
+
+    /** Resolves the provider's account for [number], following merges; creates it if new. */
+    private suspend fun account(dao: MoneyDao, provider: String, number: String, currency: String): Account {
+        val existing = findRow(dao, provider, number, currency)
+            ?: return Account(provider = provider, number = number, currency = currency).let { it.copy(id = dao.insert(it)) }
+        return existing.mergedInto?.let { dao.account(it) } ?: existing
+    }
+
+    /**
+     * Finds the provider's account row by number suffix, since one bank shows the same account
+     * as "134***982" in one SMS and "1343982" in another (parsed as "982" and "3982").
+     * An exact match wins over a suffix match.
+     */
+    private suspend fun findRow(dao: MoneyDao, provider: String, number: String, currency: String): Account? {
+        val rows = dao.accounts(provider).filter { it.currency == currency }
+        return rows.firstOrNull { it.number == number } ?: rows.firstOrNull {
+            number.length >= 3 && it.number.length >= 3 && (it.number.endsWith(number) || number.endsWith(it.number))
+        }
+    }
+
+    /** An SMS naming both a card and its account ties the card to that account for good. */
+    private suspend fun linkCard(dao: MoneyDao, provider: String, card: String, account: Account) {
+        val row = findRow(dao, provider, card, account.currency)
+        when {
+            row == null -> dao.insert(Account(provider = provider, number = card, currency = account.currency, mergedInto = account.id))
+            row.mergedInto == null -> mergeLocked(dao, row, account)
+        }
+    }
+
+    /**
+     * Links [txn] to the opposite movement of the same amount on another own account within
+     * [TRANSFER_WINDOW_MS], when each side names the other's provider, e.g. EBL "debited ...
+     * as EBL Skybanking MFS Transfer-bKash" and bKash "received deposit ... from Eastern Bank PLC".
+     * Both must name each other: an EBL transfer to a friend's bKash plus an unrelated bKash
+     * receipt of the same amount must not pair up.
+     */
+    private suspend fun linkTransfer(dao: MoneyDao, txn: Txn, provider: String) {
+        val match = dao.transferCandidates(-txn.amount, txn.currency, txn.accountId,
+            txn.timestamp - TRANSFER_WINDOW_MS, txn.timestamp + TRANSFER_WINDOW_MS)
+            .filter { names(txn.merchant, it.provider) && names(it.merchant, provider) }
+            .minByOrNull { kotlin.math.abs(it.timestamp - txn.timestamp) } ?: return
+        dao.linkTransfer(txn.id, match.id)
+    }
+
+    /** "Eastern Bank PLC" names "Eastern Bank"; "bKash" names "bKash". */
+    internal fun names(merchant: String?, provider: String) = merchant?.contains(provider, ignoreCase = true) == true
+
+    private const val TRANSFER_WINDOW_MS = 15 * 60_000L
 
     // Shortcut: assumes 2 decimal places, true for BDT and USD; revisit for JPY-like currencies.
     private fun minor(amount: BigDecimal): Long = amount.setScale(2, RoundingMode.HALF_UP).unscaledValue().toLong()

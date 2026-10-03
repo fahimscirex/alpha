@@ -176,6 +176,7 @@ abstract class BankParser {
             isFromCard = detectIsCard(smsBody),
             currency = getCurrency(),
             fee = extractFee(smsBody)?.takeIf { it.signum() > 0 },
+            cardLast4 = extractLinkedCardLast4(smsBody),
             creditCardBalanceIsAvailableCredit = creditCardBalanceIsAvailableCredit()
         )
     }
@@ -186,6 +187,9 @@ abstract class BankParser {
      *
      * Subclasses should override this to add bank-specific detection.
      */
+    /** Card digits for SMS that name a card alongside the account in [extractAccountLast4]. */
+    protected open fun extractLinkedCardLast4(message: String): String? = null
+
     /** Fee charged on top of the amount, for formats that report one. */
     protected open fun extractFee(message: String): BigDecimal? = null
 

@@ -6,6 +6,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,23 +16,32 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.fahimscirex.alpha.data.Account
 import com.fahimscirex.alpha.data.AppDb
 import com.fahimscirex.alpha.data.MoneyDao
 import com.fahimscirex.alpha.data.TxnRow
 import com.fahimscirex.alpha.sms.InboxScan
+import com.fahimscirex.alpha.sms.Ingest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -51,7 +62,15 @@ class MainActivity : ComponentActivity() {
         val dao = AppDb.get(this).dao()
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { MonthScreen(dao) }
+                Surface(Modifier.fillMaxSize()) {
+                    var showAccounts by rememberSaveable { mutableStateOf(false) }
+                    if (showAccounts) {
+                        BackHandler { showAccounts = false }
+                        AccountsScreen(dao)
+                    } else {
+                        MonthScreen(dao, onAccounts = { showAccounts = true })
+                    }
+                }
             }
         }
         if (smsPermissions.all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }) scanInbox()
@@ -70,14 +89,17 @@ private fun money(minor: Long, currency: String) =
     String.format(Locale.US, "%s %,.2f", if (currency == "BDT") "৳" else currency, minor / 100.0)
 
 @Composable
-private fun MonthScreen(dao: MoneyDao) {
+private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
     val (from, to) = remember { currentMonth() }
     val rows by dao.txns(from, to).collectAsStateWithLifecycle(emptyList())
     val spent by dao.spent(from, to).collectAsStateWithLifecycle(0L)
     val unparsed by dao.unparsedCount().collectAsStateWithLifecycle(0)
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Spent this month", style = MaterialTheme.typography.labelLarge)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Spent this month", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+            TextButton(onClick = onAccounts) { Text("Accounts") }
+        }
         Text(money(spent, "BDT"), style = MaterialTheme.typography.headlineMedium)
         if (unparsed > 0) Text("$unparsed SMS could not be read", style = MaterialTheme.typography.bodySmall)
         LazyColumn(Modifier.padding(top = 16.dp)) {
@@ -91,11 +113,56 @@ private fun TxnItem(t: TxnRow) {
     Row(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
         Column(Modifier.weight(1f)) {
             Text(t.merchant ?: t.provider, style = MaterialTheme.typography.bodyLarge)
-            val account = if (t.number.isEmpty()) t.provider else "${t.provider} ··${t.number}"
-            Text("$account · ${dayFormat.format(Date(t.timestamp))}", style = MaterialTheme.typography.bodySmall)
+            val account = label(t.provider, t.number)
+            val transfer = if (t.transferOf != null) "Transfer · " else ""
+            Text("$transfer$account · ${dayFormat.format(Date(t.timestamp))}", style = MaterialTheme.typography.bodySmall)
         }
         Text(money(t.amount, t.currency), style = MaterialTheme.typography.bodyLarge,
             color = if (t.amount < 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary)
+    }
+}
+
+private fun label(provider: String, number: String) = if (number.isEmpty()) provider else "$provider ··$number"
+
+@Composable
+private fun AccountsScreen(dao: MoneyDao) {
+    val accounts by dao.visibleAccounts().collectAsStateWithLifecycle(emptyList())
+    var merging by remember { mutableStateOf<Account?>(null) }
+    val scope = rememberCoroutineScope()
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Accounts", style = MaterialTheme.typography.headlineSmall)
+        Text("Tap an account to merge it into another, e.g. a debit card into its bank account.",
+            style = MaterialTheme.typography.bodySmall)
+        LazyColumn(Modifier.padding(top = 16.dp)) {
+            items(accounts, key = { it.id }) { a ->
+                Row(Modifier.fillMaxWidth().clickable { merging = a }.padding(vertical = 12.dp)) {
+                    Text(label(a.provider, a.number), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    a.balance?.let { Text(money(it, a.currency), style = MaterialTheme.typography.bodyLarge) }
+                }
+                HorizontalDivider()
+            }
+        }
+    }
+
+    merging?.let { from ->
+        val targets = accounts.filter { it.id != from.id && it.currency == from.currency }
+        AlertDialog(
+            onDismissRequest = { merging = null },
+            title = { Text("Merge ${label(from.provider, from.number)} into") },
+            text = {
+                if (targets.isEmpty()) Text("No other ${from.currency} account to merge into.")
+                else Column {
+                    targets.forEach { into ->
+                        Text(label(into.provider, into.number), Modifier.fillMaxWidth().clickable {
+                            merging = null
+                            scope.launch(Dispatchers.IO) { Ingest.merge(dao, from, into) }
+                        }.padding(vertical = 12.dp), style = MaterialTheme.typography.bodyLarge)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { merging = null }) { Text("Cancel") } },
+        )
     }
 }
 
