@@ -111,6 +111,7 @@ class EasternBankParser : BangladeshBankParser() {
         """AC\s+[0-9*]+\s+is (credited|debited) with BDT\s*$takaFigure\s+as\s+(.+?)\s+on\s+\d""",
         RegexOption.IGNORE_CASE
     )
+    private val mfsTransferPattern = Regex("""MFS Transfer-?\s*(\w+)""", RegexOption.IGNORE_CASE)
     private val accountBalanceSuffix = Regex("""Balance is BDT\s*$takaFigure""", RegexOption.IGNORE_CASE)
 
     // The card shapes below come with or without the "EBL CARDS:" prefix.
@@ -202,8 +203,9 @@ class EasternBankParser : BangladeshBankParser() {
             val reason = it.groupValues[3].trim()
             val merchant = when {
                 reason.equals("NPSB FUND TRANSFER", ignoreCase = true) -> "NPSB Fund Transfer"
-                reason.contains("bKash", ignoreCase = true) -> "bKash"
-                else -> reason
+                // "EBL Skybanking MFS Transfer-bKash" / "-Nagad" / "-Tap": the wallet is the counterparty.
+                else -> mfsTransferPattern.find(reason)?.groupValues?.get(1)
+                    ?: if (reason.contains("bKash", ignoreCase = true)) "bKash" else reason
             }
             val balance = accountBalanceSuffix.find(message)?.groupValues?.get(1)
             return Match(it.groupValues[2], type, merchant, balance)

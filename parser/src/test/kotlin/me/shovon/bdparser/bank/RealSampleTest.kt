@@ -144,6 +144,26 @@ class RealSampleTest {
     }
 
     @Test
+    fun `Nagad, Tap and City Bank name their counterparties, balances and fees`() {
+        check("NAGAD", "Payment to 'Software Shop Ltd' is Successful. Amount: Tk  2034.59 TxnID: 71AAAAAA Balance: Tk 65.41 30/03/2023 19:45",
+            EXPENSE, "2034.59", "Software Shop Ltd", null, "65.41")
+        check("NAGAD", "Add Money from Bank is Successful. From: Eastern Bank PLC. Amount: Tk 9200.0 TxnID: 75AAAAAA Balance: Tk 9205.59 15/03/2026 12:29",
+            INCOME, "9200.0", "Eastern Bank PLC", null, "9205.59")
+        check("NAGAD", "Cash In Received. Amount: Tk 2000.00 Uddokta: 01700000000 TxnID: 71BBBBBB Balance: 2657.34 01/05/2023 10:00",
+            INCOME, "2000.00", null, null, "2657.34")
+        check("tap", "Received Tk. 5500.00 from EBL. Fee Tk. 0.00 Your current balance is Tk 5530.50.",
+            INCOME, "5500.00", "EBL", null, null)
+        check("tap", "Cash Out Tk 5000.00 to 8801700000000. Fee Tk Paid TK. 73.50. Balance Tk 26.50. TxID: AAAAAAAAAAAAAA",
+            EXPENSE, "5000.00", null, null, "26.50", fee = "73.50")
+        check("CITYBANK", "08-Jan-2026\nCITYTOUCH TXN\nTk. 6,000 Withdrawal\nTk. 1,502 Balance\nA/C: 1234***5678\nNPSB Fee: Tk 10",
+            EXPENSE, "6000", "Citytouch transfer", "5678", "1502", fee = "10")
+        check("CITYBANK", "20-Dec-2025\nE-COMM/POS TXN\nTk. 355 Purchased\nTk. 12 Balance\nA/C: 1234***5678",
+            EXPENSE, "355", "Card purchase", "5678", "12")
+        val notice = "Dear customer, your card 4105xxxxxxxx0000 has been successfully added for Tap and Pay/ Online payment service. If you did not enroll, call 16234 immediately."
+        assertEquals(true, BankParserFactory.getParser("CITYBANK", notice)!!.isNotice(notice))
+    }
+
+    @Test
     fun `SimpleDate rejects impossible dates`() {
         assertEquals(SimpleDate(2024, 2, 29), SimpleDate.ofOrNull(2024, 2, 29))
         assertNull(SimpleDate.ofOrNull(2025, 2, 29))

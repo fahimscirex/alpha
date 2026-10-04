@@ -89,6 +89,30 @@ class IngestTest {
     }
 
     @Test
+    fun `older EBL Account Transfer links with a bKash iBanking deposit from Eastern Bank`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 6000 as EBL Account Transfer on 27-JUN-23 06:58:01 PM Balance is BDT 1000.00 Thanks. EBL Helpline 16230", 1 * min)
+        Ingest.sms(dao, "bKash", "You have received deposit from iBanking of Tk 6,000.00 from Eastern Bank Limited Internet Banking. Fee Tk 0.00. Balance Tk 6,123.97. TrxID AAA0000014 at 27/06/2023 18:58", 2 * min)
+        assertEquals(dao.txns[1].id, dao.txns[0].transferOf)
+    }
+
+    @Test
+    fun `EBL to Tap transfer links through the EBL alias`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 5500 as EBL Skybanking MFS Transfer-Tap on 17-SEP-26 10:54:57 AM Balance is BDT 372.68 Thanks. EBL Helpline 16230", 1 * min)
+        Ingest.sms(dao, "tap", "Received Tk. 5500.00 from EBL. Fee Tk. 0.00 Your current balance is Tk 5530.50.", 2 * min)
+        assertEquals(dao.txns[1].id, dao.txns[0].transferOf)
+    }
+
+    @Test
+    fun `an EBL transfer to a friend does not pair with an unrelated wallet receipt`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 500 as EBL Account Transfer on 01-JAN-26 10:00:00 AM Balance is BDT 1000.00 Thanks. EBL Helpline 16230", 1 * min)
+        Ingest.sms(dao, "bKash", "You have received Tk 500.00 from 01700000000. Fee Tk 0.00. Balance Tk 745.28. TrxID AAA0000015 at 01/01/2026 10:01", 2 * min)
+        assertNull(dao.txns[0].transferOf)
+    }
+
+    @Test
     fun `notices are dropped without becoming unparsed`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "bKash", "Payment of Tk 88.00 is being reserved for SOME MERCHANT-RM0000. Balance Tk 186.62. TrxID AAA0000013 at 24/02/2026 20:29", min)

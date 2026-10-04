@@ -88,7 +88,8 @@ object CompiledPatterns {
 
         /** "Balance: Tk 1,000.00" / "Balance Tk1,234.56" */
         val BALANCE_LABEL = Regex(
-            """Balance:?\s*$CURRENCY_TOKEN\s*([0-9][0-9,]*(?:\.\d{1,2})?)""",
+            // The currency token is optional: Nagad writes "Cash In ... Balance: 2657.34".
+            """Balance(?::\s*|\s+)(?:$CURRENCY_TOKEN\s*)?([0-9][0-9,]*(?:\.\d{1,2})?)""",
             RegexOption.IGNORE_CASE
         )
 
@@ -98,9 +99,9 @@ object CompiledPatterns {
     object TakaFee {
         private const val CURRENCY_TOKEN = """(?<![A-Za-z])(?:Tk\.?|Taka|BDT|৳)"""
 
-        /** "Fee: Tk 18.50" / "Fee Tk0.00" */
+        /** "Fee: Tk 18.50" / "Fee Tk0.00" / Tap's "Fee Tk Paid TK. 73.50" */
         val FEE_LABEL = Regex(
-            """Fee:?\s*$CURRENCY_TOKEN\s*([0-9][0-9,]*(?:\.\d{1,2})?)""",
+            """Fee:?\s*$CURRENCY_TOKEN\s*(?:Paid\s+TK\.?\s*)?([0-9][0-9,]*(?:\.\d{1,2})?)""",
             RegexOption.IGNORE_CASE
         )
 

@@ -36,4 +36,17 @@ class NagadParser : BangladeshMfsParser() {
         if (canHandle(sender)) return true
         return message.contains("nagad", ignoreCase = true)
     }
+
+    // Nagad receipts label their counterparty instead of using "to <merchant> successful".
+    private val paymentToPattern = Regex("""Payment to '([^']+)'""", RegexOption.IGNORE_CASE)
+    private val fromPattern = Regex("""From:\s*(.+?)\.?\s+Amount:""", RegexOption.IGNORE_CASE)
+    private val disbursementRefPattern = Regex("""Disbursement Received\.\s*Ref:\s*(.+?)\s+Amount:""", RegexOption.IGNORE_CASE)
+
+    override fun extractMerchant(message: String, sender: String): String? {
+        paymentToPattern.find(message)?.let { return it.groupValues[1].trim() }
+        fromPattern.find(message)?.let { return it.groupValues[1].trim() }       // "Eastern Bank PLC", "VISA-EASTERN BANK LIMITED/VISA"
+        disbursementRefPattern.find(message)?.let { return it.groupValues[1].trim() }
+        if (message.contains("Mobile Recharge", ignoreCase = true)) return "Mobile Recharge"
+        return super.extractMerchant(message, sender)
+    }
 }

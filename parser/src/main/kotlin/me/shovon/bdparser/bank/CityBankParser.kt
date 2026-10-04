@@ -94,7 +94,29 @@ class CityBankParser : BangladeshBankParser() {
         }
     }
 
-    // No counterparty/merchant name is present in any City Bank ATM/CityTouch/POS alert -
-    // only a channel + action label, which is not a merchant.
-    override fun extractMerchant(message: String, sender: String): String? = null
+    // No counterparty name is present in any City Bank ATM/CityTouch/POS alert, so the
+    // channel + action is the most useful label.
+    override fun extractMerchant(message: String, sender: String): String? {
+        val m = match(message) ?: return null
+        val channel = m.value.uppercase()
+        return when {
+            channel.startsWith("E-COMM/POS") -> "Card purchase"
+            channel.startsWith("ATM") -> if (m.groupValues[2].equals("Deposit", true)) "ATM deposit" else "Cash withdrawal"
+            channel.startsWith("CITYTOUCH") -> "Citytouch transfer"
+            else -> "Deposit"
+        }
+    }
+
+    // "... NPSB Fee: Tk 10" on Citytouch transfers.
+    private val feePattern = Regex("""Fee:\s*Tk\.?\s*([0-9][0-9,]*(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
+
+    override fun extractFee(message: String): BigDecimal? =
+        feePattern.find(message)?.let { parseTakaAmount(it.groupValues[1]) }
+
+    private val notices = listOf(
+        Regex("""Tap and Pay/ Online payment service""", RegexOption.IGNORE_CASE), // card added/removed
+        Regex("""updated fees & charges""", RegexOption.IGNORE_CASE),
+    )
+
+    override fun isNotice(message: String): Boolean = notices.any { it.containsMatchIn(message) }
 }

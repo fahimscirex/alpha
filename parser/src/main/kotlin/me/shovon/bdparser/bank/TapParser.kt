@@ -48,4 +48,16 @@ class TapParser : BangladeshMfsParser() {
 
     /** Compiled once; [canHandleMessage] runs for every parser against every unmatched SMS. */
     private val tapWordPattern = Regex("""\btap\b""", RegexOption.IGNORE_CASE)
+
+    // "Received Tk. 5000.00 from EBL." / "from VISA Card." / "Received Tk. X via NPSB."
+    private val receivedFromPattern = Regex("""Received Tk\.?\s*[0-9,.]+\s+(?:from|via)\s+([A-Za-z][^.\n]*?)\.""", RegexOption.IGNORE_CASE)
+    // "Paid Tk 6600.00 to FEES PAYMENT for ..." / "An amount of Tk. 5000 has been paid to BUP for ..."
+    private val paidToPattern = Regex("""paid to\s+(.+?)\s+for\b|^Paid Tk\s*[0-9,.]+\s+to\s+(.+?)\s+for\b""", RegexOption.IGNORE_CASE)
+
+    override fun extractMerchant(message: String, sender: String): String? {
+        receivedFromPattern.find(message)?.let { return it.groupValues[1].trim() }
+        paidToPattern.find(message)?.let { m -> return m.groupValues.drop(1).first { it.isNotEmpty() }.trim() }
+        if (message.contains("has been recharged", ignoreCase = true)) return "Mobile Recharge"
+        return super.extractMerchant(message, sender)
+    }
 }

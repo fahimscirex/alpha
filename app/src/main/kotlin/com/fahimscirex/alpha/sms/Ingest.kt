@@ -132,20 +132,31 @@ object Ingest {
     }
 
     /**
-     * Each side must name the other's provider, except that a card top-up may name only the
-     * card network on one side: EBL "Purchase txn ... from BKASH LIMITED" pairs with bKash
-     * "deposit ... from VISA Card". At least one side still has to name the other provider.
+     * At least one side must name the other's provider; the other side must name it back or
+     * at least be a generic card or transfer movement. So EBL "Purchase txn ... from BKASH
+     * LIMITED" pairs with bKash "deposit ... from VISA Card", and an older EBL "EBL Account
+     * Transfer" pairs with bKash "deposit from iBanking ... from Eastern Bank Limited", while
+     * an unrelated bKash receipt (names nothing) never pairs.
      */
     internal fun counterparts(aMerchant: String?, aProvider: String, bMerchant: String?, bProvider: String): Boolean {
         val aNamesB = names(aMerchant, bProvider)
         val bNamesA = names(bMerchant, aProvider)
-        return (aNamesB || bNamesA) && (aNamesB || isCard(aMerchant)) && (bNamesA || isCard(bMerchant))
+        return (aNamesB || bNamesA) && (aNamesB || isGenericMove(aMerchant)) && (bNamesA || isGenericMove(bMerchant))
     }
 
-    /** "Eastern Bank PLC" names "Eastern Bank"; "bKash" names "bKash". */
-    private fun names(merchant: String?, provider: String) = merchant?.contains(provider, ignoreCase = true) == true
+    /** Short names other providers' SMS use for a provider, e.g. Tap's "Received ... from EBL". */
+    private val aliases = mapOf("Eastern Bank" to listOf("EBL"), "Rocket (DBBL)" to listOf("Rocket", "DBBL"))
 
-    private fun isCard(merchant: String?) = merchant?.contains("card", ignoreCase = true) == true
+    /** "Eastern Bank PLC" names "Eastern Bank"; "from EBL" names it too. Whole words only. */
+    private fun names(merchant: String?, provider: String): Boolean {
+        if (merchant == null) return false
+        return (listOf(provider) + aliases[provider].orEmpty()).any {
+            Regex("""\b${Regex.escape(it)}\b""", RegexOption.IGNORE_CASE).containsMatchIn(merchant)
+        }
+    }
+
+    private fun isGenericMove(merchant: String?) =
+        merchant != null && (merchant.contains("card", ignoreCase = true) || merchant.contains("transfer", ignoreCase = true))
 
     /**
      * Pairs a card reversal with the purchase it undoes (same account, currency and amount,
