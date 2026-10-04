@@ -138,6 +138,19 @@ class IngestTest {
     }
 
     @Test
+    fun `a balance set by hand holds until a newer SMS states one`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "NAGAD", "Add Money from Bank is Successful. From: Eastern Bank PLC. Amount: Tk 3200.0 TxnID: 75AAAAAA Balance: Tk 3213.09 20/07/2026 14:46", 1 * min)
+        val nagad = dao.accounts.single()
+        dao.setBalance(nagad.id, 0L, 10 * min)
+        // Re-reading an older SMS (e.g. the inbox scan) must not bring the stale balance back.
+        Ingest.sms(dao, "NAGAD", "Money Received. Amount: Tk 11.00 Sender: 01700000000 Ref: x TxnID: 71CCCCCC Balance: Tk 3224.09 21/07/2026 10:00", 5 * min)
+        assertEquals(0L, dao.accounts.single().balance)
+        Ingest.sms(dao, "NAGAD", "Money Received. Amount: Tk 500.00 Sender: 01700000000 Ref: x TxnID: 71DDDDDD Balance: Tk 500.00 01/10/2026 10:00", 20 * min)
+        assertEquals(50_000L, dao.accounts.single().balance)
+    }
+
+    @Test
     fun `bKash fee is a separate expense`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "bKash", "Send Money Tk 500.00 to 01800000000 successful. Ref 1. Fee Tk 5.00. Balance Tk 745.28. TrxID AAA0000005 at 03/02/2026 17:18", min)
@@ -160,6 +173,9 @@ internal class FakeDao : MoneyDao {
         val id = accounts.size + 1L
         accounts += account.copy(id = id)
         return id
+    }
+    override suspend fun setBalance(id: Long, balance: Long, at: Long) {
+        accounts.replaceAll { if (it.id == id) it.copy(balance = balance, balanceAt = at) else it }
     }
     override suspend fun updateBalance(id: Long, balance: Long, at: Long) {
         accounts.replaceAll { if (it.id == id && it.balanceAt <= at) it.copy(balance = balance, balanceAt = at) else it }

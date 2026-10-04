@@ -19,7 +19,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -35,6 +37,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -86,6 +89,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private val dayFormat = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault())
+private val dateFormat = SimpleDateFormat("d MMM yyyy", Locale.getDefault())
 private val monthFormat = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
 
 /** Shortcut: shows minor units as major with 2 decimals; real formatting comes with multi-currency. */
@@ -175,6 +179,7 @@ private fun label(provider: String, number: String) = if (number.isEmpty()) prov
 @Composable
 private fun AccountsScreen(dao: MoneyDao) {
     val accounts by dao.visibleAccounts().collectAsStateWithLifecycle(emptyList())
+    var selected by remember { mutableStateOf<Account?>(null) }
     var merging by remember { mutableStateOf<Account?>(null) }
     var confirmReimport by remember { mutableStateOf(false) }
     var reimporting by remember { mutableStateOf(false) }
@@ -183,13 +188,19 @@ private fun AccountsScreen(dao: MoneyDao) {
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text("Accounts", style = MaterialTheme.typography.headlineSmall)
-        Text("Tap an account to merge it into another, e.g. a debit card into its bank account.",
+        Text("Tap an account to correct its balance or merge it into another, e.g. a debit card into its bank account.",
             style = MaterialTheme.typography.bodySmall)
         LazyColumn(Modifier.padding(top = 16.dp)) {
             items(accounts, key = { it.id }) { a ->
-                Row(Modifier.fillMaxWidth().clickable { merging = a }.padding(vertical = 12.dp)) {
+                Row(Modifier.fillMaxWidth().clickable { selected = a }.padding(vertical = 12.dp)) {
                     Text(label(a.provider, a.number), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    a.balance?.let { Text(money(it, a.currency), style = MaterialTheme.typography.bodyLarge) }
+                    a.balance?.let {
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text(money(it, a.currency), style = MaterialTheme.typography.bodyLarge)
+                            // The balance is only as fresh as the last SMS that stated it.
+                            Text("as of ${dateFormat.format(Date(a.balanceAt))}", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
                 HorizontalDivider()
             }
@@ -214,6 +225,33 @@ private fun AccountsScreen(dao: MoneyDao) {
                 }) { Text("Re-import") }
             },
             dismissButton = { TextButton(onClick = { confirmReimport = false }) { Text("Cancel") } },
+        )
+    }
+
+    selected?.let { a ->
+        var text by remember(a.id) { mutableStateOf("") }
+        val value = text.replace(",", "").toBigDecimalOrNull()
+        AlertDialog(
+            onDismissRequest = { selected = null },
+            title = { Text(label(a.provider, a.number)) },
+            text = {
+                Column {
+                    Text("Set the current balance if it differs from the last SMS. A newer SMS updates it again.",
+                        style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(text, { text = it }, label = { Text("Current balance (${a.currency})") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.padding(top = 8.dp))
+                    TextButton(onClick = { selected = null; merging = a }) { Text("Merge into another account…") }
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = value != null && value.scale() <= 2, onClick = {
+                    selected = null
+                    val minor = value!!.movePointRight(2).toLong()
+                    scope.launch(Dispatchers.IO) { dao.setBalance(a.id, minor, System.currentTimeMillis()) }
+                }) { Text("Save balance") }
+            },
+            dismissButton = { TextButton(onClick = { selected = null }) { Text("Cancel") } },
         )
     }
 

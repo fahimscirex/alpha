@@ -122,6 +122,10 @@ interface MoneyDao {
     @Insert
     suspend fun insert(account: Account): Long
 
+    /** Balance stated by the user; an SMS newer than [at] replaces it again. */
+    @Query("UPDATE Account SET balance = :balance, balanceAt = :at WHERE id = :id")
+    suspend fun setBalance(id: Long, balance: Long, at: Long)
+
     @Query("UPDATE Account SET balance = :balance, balanceAt = :at WHERE id = :id AND balanceAt <= :at")
     suspend fun updateBalance(id: Long, balance: Long, at: Long)
 
