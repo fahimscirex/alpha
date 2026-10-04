@@ -47,7 +47,10 @@ data class Txn(
     val timestamp: Long,
     val source: String,
     val note: String? = null,
-    /** Id of the other half when this is one side of a transfer between own accounts. */
+    /**
+     * Id of the other half when this is one side of a transfer between own accounts (or the
+     * purchase a reversal undoes). Its own id when the user marked it a transfer by hand.
+     */
     val transferOf: Long? = null,
     /** Signed taka value of a foreign-currency transaction, when known; null for BDT ones. */
     val bdtAmount: Long? = null,
@@ -131,7 +134,7 @@ interface MoneyDao {
 
     @Query(
         """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount,
-                  COALESCE((SELECT o.accountId FROM Txn o WHERE o.id = t.transferOf) = t.accountId, 0) AS reversed
+                  COALESCE((SELECT o.accountId FROM Txn o WHERE o.id = t.transferOf AND o.id != t.id) = t.accountId, 0) AS reversed
            FROM Txn t JOIN Account a ON a.id = t.accountId
            WHERE t.timestamp >= :from AND t.timestamp < :to ORDER BY t.timestamp DESC"""
     )
@@ -144,6 +147,22 @@ interface MoneyDao {
              AND timestamp >= :from AND timestamp < :to"""
     )
     fun spent(from: Long, to: Long): Flow<Long>
+
+    /** Money moved out to another own account: linked transfers, not reversed purchases. */
+    @Query(
+        """SELECT COALESCE(SUM(-COALESCE(bdtAmount, amount)), 0) FROM Txn t
+           WHERE amount < 0 AND transferOf IS NOT NULL AND (currency = 'BDT' OR bdtAmount IS NOT NULL)
+             AND (transferOf = id OR (SELECT o.accountId FROM Txn o WHERE o.id = t.transferOf) != accountId)
+             AND timestamp >= :from AND timestamp < :to"""
+    )
+    fun transferred(from: Long, to: Long): Flow<Long>
+
+    /** Marks a transaction as a transfer between own accounts when no counterpart SMS exists. */
+    @Query("UPDATE Txn SET transferOf = id WHERE id = :id")
+    suspend fun markTransfer(id: Long)
+
+    @Query("UPDATE Txn SET transferOf = NULL WHERE id IN (:a, :b)")
+    suspend fun unlink(a: Long, b: Long)
 
     @Query("SELECT * FROM UnparsedSms")
     suspend fun unparsed(): List<UnparsedSms>

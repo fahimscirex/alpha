@@ -34,6 +34,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -98,7 +99,10 @@ private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
     val (from, to) = remember(offset) { month(offset) }
     val rows by remember(from) { dao.txns(from, to) }.collectAsStateWithLifecycle(emptyList())
     val spent by remember(from) { dao.spent(from, to) }.collectAsStateWithLifecycle(0L)
+    val transferred by remember(from) { dao.transferred(from, to) }.collectAsStateWithLifecycle(0L)
     val unparsed by dao.unparsedCount().collectAsStateWithLifecycle(0)
+    var selected by remember { mutableStateOf<TxnRow?>(null) }
+    val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -110,16 +114,44 @@ private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
         }
         Text("Spent", style = MaterialTheme.typography.labelLarge)
         Text(money(spent, "BDT"), style = MaterialTheme.typography.headlineMedium)
+        if (transferred > 0) {
+            Text("Moved between your accounts: ${money(transferred, "BDT")}", style = MaterialTheme.typography.bodySmall)
+        }
         if (unparsed > 0) Text("$unparsed SMS could not be read", style = MaterialTheme.typography.bodySmall)
         LazyColumn(Modifier.padding(top = 16.dp)) {
-            items(rows, key = { it.id }) { TxnItem(it); HorizontalDivider() }
+            items(rows, key = { it.id }) { TxnItem(it, onClick = { selected = it }); HorizontalDivider() }
         }
+    }
+
+    // Manual override for movements the automatic matching misses or gets wrong.
+    selected?.let { t ->
+        val linked = t.transferOf != null
+        AlertDialog(
+            onDismissRequest = { selected = null },
+            title = { Text(t.merchant ?: t.provider) },
+            text = {
+                Text(
+                    if (linked) "Counted as a transfer between your accounts, not as spending or income."
+                    else "Counted as ${if (t.amount < 0) "spending" else "income"}. Mark it as a transfer if the money " +
+                        "only moved between your own accounts."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    selected = null
+                    scope.launch(Dispatchers.IO) {
+                        if (linked) dao.unlink(t.id, t.transferOf!!) else dao.markTransfer(t.id)
+                    }
+                }) { Text(if (linked) "Not a transfer" else "Mark as transfer") }
+            },
+            dismissButton = { TextButton(onClick = { selected = null }) { Text("Cancel") } },
+        )
     }
 }
 
 @Composable
-private fun TxnItem(t: TxnRow) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+private fun TxnItem(t: TxnRow, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp)) {
         Column(Modifier.weight(1f)) {
             Text(t.merchant ?: t.provider, style = MaterialTheme.typography.bodyLarge)
             val account = label(t.provider, t.number)
@@ -144,7 +176,10 @@ private fun label(provider: String, number: String) = if (number.isEmpty()) prov
 private fun AccountsScreen(dao: MoneyDao) {
     val accounts by dao.visibleAccounts().collectAsStateWithLifecycle(emptyList())
     var merging by remember { mutableStateOf<Account?>(null) }
+    var confirmReimport by remember { mutableStateOf(false) }
+    var reimporting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text("Accounts", style = MaterialTheme.typography.headlineSmall)
@@ -159,6 +194,27 @@ private fun AccountsScreen(dao: MoneyDao) {
                 HorizontalDivider()
             }
         }
+        TextButton(onClick = { confirmReimport = true }, enabled = !reimporting, modifier = Modifier.padding(top = 16.dp)) {
+            Text(if (reimporting) "Re-importing…" else "Re-import from SMS")
+        }
+    }
+
+    if (confirmReimport) {
+        AlertDialog(
+            onDismissRequest = { confirmReimport = false },
+            title = { Text("Re-import from SMS?") },
+            text = { Text("Deletes all transactions, merged accounts and manual changes, then reads your SMS inbox again.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmReimport = false
+                    reimporting = true
+                    scope.launch(Dispatchers.IO) {
+                        try { InboxScan.reimport(context) } finally { reimporting = false }
+                    }
+                }) { Text("Re-import") }
+            },
+            dismissButton = { TextButton(onClick = { confirmReimport = false }) { Text("Cancel") } },
+        )
     }
 
     merging?.let { from ->

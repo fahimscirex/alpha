@@ -79,6 +79,9 @@ object Ingest {
         return (minor(balance) - before).takeIf { it != 0L && (it > 0) == (sign > 0) }
     }
 
+    /** Runs [block] while no SMS is being ingested, e.g. to wipe the database. */
+    suspend fun exclusive(block: suspend () -> Unit) = lock.withLock { block() }
+
     /** Merges [from] into [into]: its transactions move over and its number resolves to [into] from now on. */
     suspend fun merge(dao: MoneyDao, from: Account, into: Account) = lock.withLock { mergeLocked(dao, from, into) }
 
@@ -126,7 +129,13 @@ object Ingest {
     private suspend fun linkTransfer(dao: MoneyDao, txn: Txn, provider: String) {
         val match = dao.transferCandidates(-txn.amount, txn.currency, txn.accountId,
             txn.timestamp - TRANSFER_WINDOW_MS, txn.timestamp + TRANSFER_WINDOW_MS)
-            .filter { counterparts(txn.merchant, provider, it.merchant, it.provider) }
+            .filter {
+                counterparts(txn.merchant, provider, it.merchant, it.provider) ||
+                    // Neither side names the other (EBL "NPSB Fund Transfer" -> City "Deposit"):
+                    // only both being plain transfer movements within a few minutes will do.
+                    (isGenericMove(txn.merchant) && isGenericMove(it.merchant) &&
+                        kotlin.math.abs(it.timestamp - txn.timestamp) <= UNNAMED_WINDOW_MS)
+            }
             .minByOrNull { kotlin.math.abs(it.timestamp - txn.timestamp) } ?: return
         dao.linkTransfer(txn.id, match.id)
     }
@@ -155,8 +164,11 @@ object Ingest {
         }
     }
 
+    /** Labels of plain money movements, as opposed to purchases and merchant payments. */
+    private val genericMoveWords = listOf("card", "transfer", "npsb", "deposit")
+
     private fun isGenericMove(merchant: String?) =
-        merchant != null && (merchant.contains("card", ignoreCase = true) || merchant.contains("transfer", ignoreCase = true))
+        merchant != null && genericMoveWords.any { merchant.contains(it, ignoreCase = true) }
 
     /**
      * Pairs a card reversal with the purchase it undoes (same account, currency and amount,
@@ -174,6 +186,7 @@ object Ingest {
     private const val REVERSAL_WINDOW_MS = 60 * 86_400_000L
 
     private const val TRANSFER_WINDOW_MS = 15 * 60_000L
+    private const val UNNAMED_WINDOW_MS = 5 * 60_000L
 
     // Shortcut: assumes 2 decimal places, true for BDT and USD; revisit for JPY-like currencies.
     private fun minor(amount: BigDecimal): Long = amount.setScale(2, RoundingMode.HALF_UP).unscaledValue().toLong()

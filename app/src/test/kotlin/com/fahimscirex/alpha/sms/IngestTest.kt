@@ -105,6 +105,23 @@ class IngestTest {
     }
 
     @Test
+    fun `transfers naming neither side link only when both are plain movements minutes apart`() = runBlocking {
+        val dao = FakeDao()
+        // EBL NPSB transfer to own City Bank account, 44 seconds apart.
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 3000 as NPSB FUND TRANSFER on 19-MAR-26 10:12:31 AM Balance is BDT 1000.00 Thanks. EBL Helpline 16230", 0L)
+        Ingest.sms(dao, "CITYBANK", "19-Mar-2026\nTk. 3,000 Deposit\nTk. 3,003 Balance\nA/C: 1234***5678", 44_000L)
+        assertEquals(dao.txns[1].id, dao.txns[0].transferOf)
+        // bKash to own EBL VISA debit card, 3 seconds apart.
+        Ingest.sms(dao, "bKash", "bKash to Bank of Tk 2,500.00 for VISA Debit Card is successful. Fee Tk 31.25. Balance Tk 72.73. TrxID AAA0000016 at 29/03/2024 21:39", 10 * min)
+        Ingest.sms(dao, "EBL", "AC 123***456 is credited with BDT 2500 as VISA MONEY TRANSFER on 29-MAR-24 09:39:31 PM Balance is BDT 3500.00 Thanks. EBL Helpline 16230", 10 * min + 3_000L)
+        assertEquals(dao.txns.last().id, dao.txns.first { it.amount == -250_000L }.transferOf)
+        // The same NPSB/Deposit shapes 20 minutes apart stay separate.
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 700 as NPSB FUND TRANSFER on 20-MAR-26 10:00:00 AM Balance is BDT 300.00 Thanks. EBL Helpline 16230", 100 * min)
+        Ingest.sms(dao, "CITYBANK", "20-Mar-2026\nTk. 700 Deposit\nTk. 1,000 Balance\nA/C: 1234***5678", 120 * min)
+        assertNull(dao.txns.first { it.amount == -70_000L }.transferOf)
+    }
+
+    @Test
     fun `an EBL transfer to a friend does not pair with an unrelated wallet receipt`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 500 as EBL Account Transfer on 01-JAN-26 10:00:00 AM Balance is BDT 1000.00 Thanks. EBL Helpline 16230", 1 * min)
@@ -179,4 +196,9 @@ internal class FakeDao : MoneyDao {
     override fun txns(from: Long, to: Long): Flow<List<TxnRow>> = flowOf(emptyList())
     override fun spent(from: Long, to: Long): Flow<Long> = flowOf(spent())
     override fun unparsedCount(): Flow<Int> = flowOf(unparsed.size)
+    override fun transferred(from: Long, to: Long): Flow<Long> = flowOf(0)
+    override suspend fun markTransfer(id: Long) { linkTransfer(id, id) }
+    override suspend fun unlink(a: Long, b: Long) {
+        txns.replaceAll { if (it.id == a || it.id == b) it.copy(transferOf = null) else it }
+    }
 }

@@ -13,6 +13,15 @@ object InboxScan {
     private const val PREFS = "scan"
     private const val KEY_LAST = "last"
 
+    /** Deletes everything imported (and any manual changes) and imports the inbox again. */
+    suspend fun reimport(context: Context) {
+        Ingest.exclusive {
+            AppDb.get(context).clearAllTables()
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
+        }
+        run(context)
+    }
+
     suspend fun run(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val since = prefs.getLong(KEY_LAST, System.currentTimeMillis() - FIRST_SCAN_DAYS * 86_400_000L)
