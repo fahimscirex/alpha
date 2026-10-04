@@ -4,6 +4,7 @@ import com.fahimscirex.alpha.data.Account
 import com.fahimscirex.alpha.data.MoneyDao
 import com.fahimscirex.alpha.data.Txn
 import com.fahimscirex.alpha.data.UnparsedSms
+import com.fahimscirex.alpha.data.categoryFor
 import me.shovon.bdparser.SmsFilter
 import me.shovon.bdparser.TransactionType
 import me.shovon.bdparser.bank.BankParserFactory
@@ -50,16 +51,19 @@ object Ingest {
         t.cardLast4?.let { linkCard(dao, t.bankName, it, account) }
         val hash = t.generateTransactionId()
         val amount = sign * minor(t.amount)
+        val rules = dao.rules()
         val txn = Txn(hash = hash, accountId = account.id, amount = amount, currency = t.currency,
             merchant = t.merchant, timestamp = timestamp, source = "SMS",
-            bdtAmount = if (t.currency != account.currency) takaCost(account, t.balance, timestamp, sign) else null)
+            bdtAmount = if (t.currency != account.currency) takaCost(account, t.balance, timestamp, sign) else null,
+            categoryId = categoryFor(t.merchant, rules))
         val id = dao.insert(txn)
         if (id > 0) {
             if (t.isReversal) linkReversal(dao, txn.copy(id = id)) else linkTransfer(dao, txn.copy(id = id), account.provider)
         }
         t.fee?.let {
+            val merchant = "${t.bankName} fee"
             dao.insert(Txn(hash = "$hash:fee", accountId = account.id, amount = -minor(it), currency = t.currency,
-                merchant = "${t.bankName} fee", timestamp = timestamp, source = "SMS"))
+                merchant = merchant, timestamp = timestamp, source = "SMS", categoryId = categoryFor(merchant, rules)))
         }
         // A credit card's "balance" is its available credit, not money held; skip until cards exist (v2).
         if (!(t.isFromCard && t.creditCardBalanceIsAvailableCredit)) {
@@ -84,11 +88,12 @@ object Ingest {
      * first use. A known account balance moves with it only when the entry is not older than
      * that balance, so back-dating an expense never disturbs a balance stated later.
      */
-    suspend fun addManual(dao: MoneyDao, accountId: Long?, amount: Long, description: String?, timestamp: Long) =
+    suspend fun addManual(dao: MoneyDao, accountId: Long?, amount: Long, description: String?, timestamp: Long, categoryId: Long? = null) =
         lock.withLock {
             val account = accountId?.let { dao.account(it) } ?: account(dao, CASH, "", "BDT")
             dao.insert(Txn(hash = "manual:${java.util.UUID.randomUUID()}", accountId = account.id, amount = amount,
-                currency = account.currency, merchant = description, timestamp = timestamp, source = "MANUAL"))
+                currency = account.currency, merchant = description, timestamp = timestamp, source = "MANUAL",
+                categoryId = categoryId ?: categoryFor(description, dao.rules())))
             dao.adjustBalance(account.id, amount, timestamp)
         }
 

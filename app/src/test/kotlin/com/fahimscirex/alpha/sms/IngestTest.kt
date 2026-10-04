@@ -1,6 +1,10 @@
 package com.fahimscirex.alpha.sms
 
 import com.fahimscirex.alpha.data.Account
+import com.fahimscirex.alpha.data.Category
+import com.fahimscirex.alpha.data.CategoryRule
+import com.fahimscirex.alpha.data.CategoryTotal
+import com.fahimscirex.alpha.data.DEFAULT_CATEGORIES
 import com.fahimscirex.alpha.data.MoneyDao
 import com.fahimscirex.alpha.data.Txn
 import com.fahimscirex.alpha.data.TxnRow
@@ -171,6 +175,31 @@ class IngestTest {
     }
 
     @Test
+    fun `transactions are categorized from the merchant, user rules first`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "bKash", "Payment of Tk 342.80 to FOODPANDA BANGLADESH LIMITED is successful. Balance Tk 1,017.17. TrxID AAA0000020 at 15/07/2023 13:24", 1 * min)
+        Ingest.sms(dao, "bKash", "Send Money Tk 500.00 to 01800000000 successful. Ref 1. Fee Tk 5.00. Balance Tk 745.28. TrxID AAA0000021 at 03/02/2026 17:18", 2 * min)
+        Ingest.sms(dao, "EBL", "Purchase txn USD3.99 from NETFLIX.COM SINGAP.Card 4520170001 on 04-Oct-26 03:52:08 AM BST.Your A/C 1230456 Balance BDT 43417.94. EBL Helpline 16230", 3 * min)
+        Ingest.sms(dao, "EBL", "QR txn BDT 20 through EBL Skybanking at BANGLA QR PAYMENT  from Card 452017**0001 on 01-Oct-26 01:42:16 PM BST. EBL Helpline 16230", 4 * min)
+        val byMerchant = dao.txns.associate { it.merchant to it.categoryId }
+        assertEquals(dao.categoryId("Food & Dining"), byMerchant["FOODPANDA BANGLADESH"])
+        assertEquals(dao.categoryId("Fees & Charges"), byMerchant["bKash fee"])
+        assertEquals(dao.categoryId("Subscriptions"), byMerchant["NETFLIX.COM SINGAP"])
+        assertNull(byMerchant["BANGLA QR PAYMENT"])
+        // "Always use Groceries for BANGLA QR PAYMENT": a user rule, applied to later SMS too.
+        dao.insert(CategoryRule(pattern = "=bangla qr payment", categoryId = dao.categoryId("Groceries"), user = true))
+        Ingest.sms(dao, "EBL", "QR txn BDT 90 through EBL Skybanking at BANGLA QR PAYMENT  from Card 452017**0001 on 01-Oct-26 01:40:16 PM BST. EBL Helpline 16230", 5 * min)
+        assertEquals(dao.categoryId("Groceries"), dao.txns.last().categoryId)
+        // An exact rule for "bKash" leaves "bKash fee" in Fees.
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 700 as EBL Skybanking MFS Transfer-bKash on 01-OCT-26 03:48:17 PM Balance is BDT 44099.59 Thanks. EBL Helpline 16230", 5 * min + 1)
+        assertEquals(dao.categoryId("Sent to others"), dao.txns.last().categoryId)
+        assertEquals(dao.categoryId("Fees & Charges"), dao.txns.first { it.merchant == "bKash fee" }.categoryId)
+        // Manual entries pick a category from their description too.
+        Ingest.addManual(dao, null, -120_00L, "Pathao ride", 6 * min)
+        assertEquals(dao.categoryId("Transport"), dao.txns.last().categoryId)
+    }
+
+    @Test
     fun `bKash fee is a separate expense`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "bKash", "Send Money Tk 500.00 to 01800000000 successful. Ref 1. Fee Tk 5.00. Balance Tk 745.28. TrxID AAA0000005 at 03/02/2026 17:18", min)
@@ -232,6 +261,26 @@ internal class FakeDao : MoneyDao {
     override fun txns(from: Long, to: Long): Flow<List<TxnRow>> = flowOf(emptyList())
     override fun spent(from: Long, to: Long): Flow<Long> = flowOf(spent())
     override fun unparsedCount(): Flow<Int> = flowOf(unparsed.size)
+    val categories = DEFAULT_CATEGORIES.mapIndexed { i, (name, emoji, _) -> Category(i + 1L, name, emoji) }.toMutableList()
+    val rules = DEFAULT_CATEGORIES.flatMapIndexed { i, (_, _, ps) -> ps.map { CategoryRule(0, it, i + 1L, false) } }.toMutableList()
+    fun categoryId(name: String) = categories.first { it.name == name }.id
+    override fun received(from: Long, to: Long): Flow<Long> = flowOf(0)
+    override fun spentByCategory(from: Long, to: Long): Flow<List<CategoryTotal>> = flowOf(emptyList())
+    override fun categories(): Flow<List<Category>> = flowOf(categories)
+    override suspend fun insert(category: Category): Long { val id = categories.size + 1L; categories += category.copy(id = id); return id }
+    override suspend fun updateCategory(id: Long, name: String, emoji: String) { categories.replaceAll { if (it.id == id) it.copy(name = name, emoji = emoji) else it } }
+    override suspend fun deleteCategoryRow(id: Long) { categories.removeAll { it.id == id } }
+    override suspend fun uncategorize(id: Long) { txns.replaceAll { if (it.categoryId == id) it.copy(categoryId = null) else it } }
+    override suspend fun deleteRulesFor(id: Long) { rules.removeAll { it.categoryId == id } }
+    override suspend fun rules() = rules.sortedWith(compareByDescending<CategoryRule> { it.user }.thenByDescending { it.pattern.length })
+    override suspend fun insert(rule: CategoryRule): Long { rules.removeAll { it.pattern == rule.pattern }; rules += rule; return 1 }
+    override suspend fun setCategory(id: Long, categoryId: Long?) { txns.replaceAll { if (it.id == id) it.copy(categoryId = categoryId) else it } }
+    override suspend fun setCategoryForMerchant(merchant: String, categoryId: Long) {
+        txns.replaceAll { if (it.merchant.equals(merchant, ignoreCase = true)) it.copy(categoryId = categoryId) else it }
+    }
+    override suspend fun renameManual(id: Long, merchant: String?) {
+        txns.replaceAll { if (it.id == id && it.source == "MANUAL") it.copy(merchant = merchant) else it }
+    }
     override fun transferred(from: Long, to: Long): Flow<Long> = flowOf(0)
     override suspend fun markTransfer(id: Long) { linkTransfer(id, id) }
     override suspend fun adjustBalance(id: Long, delta: Long, at: Long) {

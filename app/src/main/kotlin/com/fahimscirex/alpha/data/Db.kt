@@ -54,7 +54,30 @@ data class Txn(
     val transferOf: Long? = null,
     /** Signed taka value of a foreign-currency transaction, when known; null for BDT ones. */
     val bdtAmount: Long? = null,
+    val categoryId: Long? = null,
 )
+
+/** A spending/income category; [emoji] is its icon, so users can pick any without assets. */
+@Entity
+data class Category(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val emoji: String,
+)
+
+/**
+ * Assigns [categoryId] to transactions whose merchant contains [pattern] (lowercase). Built-in
+ * rules ship with the app; [user] rules come from "always use this category" and win.
+ */
+@Entity(indices = [Index(value = ["pattern"], unique = true)])
+data class CategoryRule(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val pattern: String,
+    val categoryId: Long,
+    val user: Boolean,
+)
+
+data class CategoryTotal(val categoryId: Long?, val name: String?, val emoji: String?, val total: Long)
 
 /** SMS from a known sender that looked financial but failed to parse; shown for parser fixes. */
 @Entity(indices = [Index(value = ["sender", "body", "timestamp"], unique = true)])
@@ -77,6 +100,9 @@ data class TxnRow(
     val bdtAmount: Long?,
     /** "SMS" or "MANUAL". */
     val source: String,
+    val categoryId: Long?,
+    val emoji: String?,
+    val categoryName: String?,
     /** The linked other half is on the same account: a reversal, not a transfer. */
     val reversed: Boolean,
 )
@@ -144,8 +170,9 @@ interface MoneyDao {
 
     @Query(
         """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount, t.source,
+                  t.categoryId, c.emoji, c.name AS categoryName,
                   COALESCE((SELECT o.accountId FROM Txn o WHERE o.id = t.transferOf AND o.id != t.id) = t.accountId, 0) AS reversed
-           FROM Txn t JOIN Account a ON a.id = t.accountId
+           FROM Txn t JOIN Account a ON a.id = t.accountId LEFT JOIN Category c ON c.id = t.categoryId
            WHERE t.timestamp >= :from AND t.timestamp < :to ORDER BY t.timestamp DESC"""
     )
     fun txns(from: Long, to: Long): Flow<List<TxnRow>>
@@ -157,6 +184,59 @@ interface MoneyDao {
              AND timestamp >= :from AND timestamp < :to"""
     )
     fun spent(from: Long, to: Long): Flow<Long>
+
+    /** Money received, excluding transfers between own accounts and reversals. */
+    @Query(
+        """SELECT COALESCE(SUM(COALESCE(bdtAmount, amount)), 0) FROM Txn
+           WHERE amount > 0 AND transferOf IS NULL AND (currency = 'BDT' OR bdtAmount IS NOT NULL)
+             AND timestamp >= :from AND timestamp < :to"""
+    )
+    fun received(from: Long, to: Long): Flow<Long>
+
+    /** Spending per category, largest first; uncategorized spending has a null category. */
+    @Query(
+        """SELECT t.categoryId, c.name, c.emoji, SUM(-COALESCE(t.bdtAmount, t.amount)) AS total
+           FROM Txn t LEFT JOIN Category c ON c.id = t.categoryId
+           WHERE t.amount < 0 AND t.transferOf IS NULL AND (t.currency = 'BDT' OR t.bdtAmount IS NOT NULL)
+             AND t.timestamp >= :from AND t.timestamp < :to
+           GROUP BY t.categoryId ORDER BY total DESC"""
+    )
+    fun spentByCategory(from: Long, to: Long): Flow<List<CategoryTotal>>
+
+    @Query("SELECT * FROM Category ORDER BY name")
+    fun categories(): Flow<List<Category>>
+
+    @Insert
+    suspend fun insert(category: Category): Long
+
+    @Query("UPDATE Category SET name = :name, emoji = :emoji WHERE id = :id")
+    suspend fun updateCategory(id: Long, name: String, emoji: String)
+
+    @Query("DELETE FROM Category WHERE id = :id")
+    suspend fun deleteCategoryRow(id: Long)
+
+    @Query("UPDATE Txn SET categoryId = NULL WHERE categoryId = :id")
+    suspend fun uncategorize(id: Long)
+
+    @Query("DELETE FROM CategoryRule WHERE categoryId = :id")
+    suspend fun deleteRulesFor(id: Long)
+
+    /** User rules first, then longer (more specific) patterns. */
+    @Query("SELECT * FROM CategoryRule ORDER BY user DESC, LENGTH(pattern) DESC")
+    suspend fun rules(): List<CategoryRule>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(rule: CategoryRule): Long
+
+    @Query("UPDATE Txn SET categoryId = :categoryId WHERE id = :id")
+    suspend fun setCategory(id: Long, categoryId: Long?)
+
+    /** Re-categorizes every transaction from [merchant], for "always use this category". */
+    @Query("UPDATE Txn SET categoryId = :categoryId WHERE LOWER(merchant) = LOWER(:merchant)")
+    suspend fun setCategoryForMerchant(merchant: String, categoryId: Long)
+
+    @Query("UPDATE Txn SET merchant = :merchant WHERE id = :id AND source = 'MANUAL'")
+    suspend fun renameManual(id: Long, merchant: String?)
 
     /** Money moved out to another own account: linked transfers, not reversed purchases. */
     @Query(
@@ -207,7 +287,10 @@ interface MoneyDao {
     fun unparsedCount(): Flow<Int>
 }
 
-@Database(entities = [Account::class, Txn::class, UnparsedSms::class], version = 3, exportSchema = false)
+@Database(
+    entities = [Account::class, Txn::class, UnparsedSms::class, Category::class, CategoryRule::class],
+    version = 4, exportSchema = false,
+)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): MoneyDao
 
@@ -227,9 +310,22 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE Txn ADD COLUMN categoryId INTEGER")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `Category` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `emoji` TEXT NOT NULL)")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `CategoryRule` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `pattern` TEXT NOT NULL, `categoryId` INTEGER NOT NULL, `user` INTEGER NOT NULL)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_CategoryRule_pattern` ON `CategoryRule` (`pattern`)")
+                seedCategories(db)
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "alpha.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addCallback(object : Callback() {
+                    override fun onCreate(db: SupportSQLiteDatabase) = seedCategories(db)
+                })
                 .build().also { instance = it }
         }
     }

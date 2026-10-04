@@ -40,6 +40,8 @@ dependencies {
 
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.material3:material3")
+    // Only the icons used survive R8, so the full set costs nothing in the release APK.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("androidx.profileinstaller:profileinstaller:1.4.1")
