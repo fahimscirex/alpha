@@ -10,6 +10,7 @@ import com.fahimscirex.alpha.data.Txn
 import com.fahimscirex.alpha.data.TxnRow
 import com.fahimscirex.alpha.data.TxnSide
 import com.fahimscirex.alpha.data.UnparsedSms
+import com.fahimscirex.alpha.data.UserEdit
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
@@ -199,6 +200,59 @@ class IngestTest {
         assertEquals(dao.categoryId("Transport"), dao.txns.last().categoryId)
     }
 
+    private val inbox = listOf(
+        Triple("EBL", "AC 123***456 is debited with BDT 1000 as EBL Skybanking MFS Transfer-bKash on 25-FEB-26 04:07:10 PM Balance is BDT 24912.52 Thanks. EBL Helpline 16230", 1 * min),
+        Triple("bKash", "You have received deposit from iBanking of Tk 1,000.00 from Eastern Bank PLC. Internet Banking. Fee Tk 0.00. Balance Tk 1,186.62. TrxID AAA0000001 at 25/02/2026 16:07", 2 * min),
+        Triple("EBL", "QR txn BDT 20 through EBL Skybanking at BANGLA QR PAYMENT  from Card 452017**0001 on 01-Oct-26 01:42:16 PM BST. EBL Helpline 16230", 3 * min),
+        Triple("NAGAD", "Add Money from Bank is Successful. From: Trust Bank Limited Amount: Tk 100 TxnID: 71RCOMHG Balance: Tk 3213.09 14/03/2023 19:00", 4 * min),
+    )
+    private suspend fun FakeDao.replay() = inbox.forEach { (s, b, t) -> Ingest.sms(this, s, b, t) }
+
+    /** Sets up the user's own changes: a category pick, an unlinked transfer, a mark, a corrected balance. */
+    private suspend fun FakeDao.edit() {
+        replay()
+        val qr = txns.first { it.merchant == "BANGLA QR PAYMENT" }
+        setCategory(qr.id, categoryId("Groceries"))
+        markTransfer(qr.id)
+        val out = txns.first { it.amount == -100_000L }
+        unlink(out.id, out.transferOf!!)
+        setBalance(accounts.first { it.provider == "Nagad" }.id, 0L, 10 * min)
+        Ingest.addManual(this, null, -50_00L, "Tea", 11 * min)
+    }
+
+    @Test
+    fun `re-import keeping edits restores categories, links and corrected balances`() = runBlocking {
+        val dao = FakeDao()
+        dao.edit()
+        Ingest.rebuild(dao, keepEdits = true) { dao.replay() }
+
+        val qr = dao.txns.first { it.merchant == "BANGLA QR PAYMENT" }
+        assertEquals(dao.categoryId("Groceries"), qr.categoryId)
+        assertEquals(qr.id, qr.transferOf)
+        // The replay re-linked EBL -> bKash, but the user had unlinked it.
+        assertNull(dao.txns.first { it.amount == -100_000L }.transferOf)
+        assertNull(dao.txns.first { it.amount == 100_000L }.transferOf)
+        assertEquals(0L, dao.accounts.first { it.provider == "Nagad" }.balance)
+        assertEquals("Tea", dao.txns.single { it.source == "MANUAL" }.merchant)
+        assertEquals(5, dao.txns.size)
+    }
+
+    @Test
+    fun `re-import overwriting edits rebuilds from SMS but keeps manual entries`() = runBlocking {
+        val dao = FakeDao()
+        dao.edit()
+        Ingest.rebuild(dao, keepEdits = false) { dao.replay() }
+
+        val qr = dao.txns.first { it.merchant == "BANGLA QR PAYMENT" }
+        assertNull(qr.categoryId)
+        assertNull(qr.transferOf)
+        val out = dao.txns.first { it.amount == -100_000L }
+        assertEquals(dao.txns.first { it.amount == 100_000L }.id, out.transferOf)
+        assertEquals(321_309L, dao.accounts.first { it.provider == "Nagad" }.balance)
+        assertEquals("Tea", dao.txns.single { it.source == "MANUAL" }.merchant)
+        assertEquals(false, dao.txns.any { it.userCategory || it.userLink })
+    }
+
     @Test
     fun `bKash fee is a separate expense`() = runBlocking {
         val dao = FakeDao()
@@ -208,6 +262,8 @@ class IngestTest {
 }
 
 internal class FakeDao : MoneyDao {
+    private var lastAccountId = 0L
+    private var lastTxnId = 0L
     val accounts = mutableListOf<Account>()
     val txns = mutableListOf<Txn>()
     val unparsed = mutableListOf<UnparsedSms>()
@@ -219,7 +275,7 @@ internal class FakeDao : MoneyDao {
     override suspend fun account(id: Long) = accounts.first { it.id == id }
     override fun visibleAccounts(): Flow<List<Account>> = flowOf(accounts.filter { it.mergedInto == null })
     override suspend fun insert(account: Account): Long {
-        val id = accounts.size + 1L
+        val id = ++lastAccountId
         accounts += account.copy(id = id)
         return id
     }
@@ -251,7 +307,7 @@ internal class FakeDao : MoneyDao {
     }
     override suspend fun insert(txn: Txn): Long {
         if (txns.any { it.hash == txn.hash }) return -1
-        val id = txns.size + 1L
+        val id = ++lastTxnId
         txns += txn.copy(id = id)
         return id
     }
@@ -274,7 +330,21 @@ internal class FakeDao : MoneyDao {
     override suspend fun deleteRulesFor(id: Long) { rules.removeAll { it.categoryId == id } }
     override suspend fun rules() = rules.sortedWith(compareByDescending<CategoryRule> { it.user }.thenByDescending { it.pattern.length })
     override suspend fun insert(rule: CategoryRule): Long { rules.removeAll { it.pattern == rule.pattern }; rules += rule; return 1 }
-    override suspend fun setCategory(id: Long, categoryId: Long?) { txns.replaceAll { if (it.id == id) it.copy(categoryId = categoryId) else it } }
+    override suspend fun setCategory(id: Long, categoryId: Long?) { txns.replaceAll { if (it.id == id) it.copy(categoryId = categoryId, userCategory = true) else it } }
+    override suspend fun forgetUserEdits() { txns.replaceAll { it.copy(userCategory = false, userLink = false) } }
+    override suspend fun userEdits() = txns.filter { it.userCategory || it.userLink }.map { t ->
+        UserEdit(t.hash, t.categoryId, t.userCategory, t.userLink, txns.firstOrNull { it.id == t.transferOf }?.hash)
+    }
+    override suspend fun allAccounts() = accounts.toList()
+    override suspend fun resetBalances() { accounts.replaceAll { it.copy(balance = null, balanceAt = 0) } }
+    override suspend fun clearAutoLinks() { txns.replaceAll { if (!it.userLink) it.copy(transferOf = null) else it } }
+    override suspend fun byHash(hash: String) = txns.firstOrNull { it.hash == hash }
+    override suspend fun setLink(id: Long, transferOf: Long?, user: Boolean) {
+        txns.replaceAll { if (it.id == id) it.copy(transferOf = transferOf, userLink = user) else it }
+    }
+    override suspend fun restoreCategory(hash: String, categoryId: Long?) {
+        txns.replaceAll { if (it.hash == hash) it.copy(categoryId = categoryId, userCategory = true) else it }
+    }
     override suspend fun setCategoryForMerchant(merchant: String, categoryId: Long) {
         txns.replaceAll { if (it.merchant.equals(merchant, ignoreCase = true)) it.copy(categoryId = categoryId) else it }
     }
@@ -282,7 +352,7 @@ internal class FakeDao : MoneyDao {
         txns.replaceAll { if (it.id == id && it.source == "MANUAL") it.copy(merchant = merchant) else it }
     }
     override fun transferred(from: Long, to: Long): Flow<Long> = flowOf(0)
-    override suspend fun markTransfer(id: Long) { linkTransfer(id, id) }
+    override suspend fun markTransfer(id: Long) { setLink(id, id, true) }
     override suspend fun adjustBalance(id: Long, delta: Long, at: Long) {
         accounts.replaceAll { if (it.id == id && it.balance != null && it.balanceAt <= at) it.copy(balance = it.balance + delta, balanceAt = at) else it }
     }
@@ -294,6 +364,6 @@ internal class FakeDao : MoneyDao {
     override suspend fun deleteUnusedAccounts() { accounts.removeAll { a -> txns.none { it.accountId == a.id } } }
     override suspend fun resetAccounts() { accounts.replaceAll { it.copy(balance = null, balanceAt = 0, mergedInto = null) } }
     override suspend fun unlink(a: Long, b: Long) {
-        txns.replaceAll { if (it.id == a || it.id == b) it.copy(transferOf = null) else it }
+        txns.replaceAll { if (it.id == a || it.id == b) it.copy(transferOf = null, userLink = true) else it }
     }
 }

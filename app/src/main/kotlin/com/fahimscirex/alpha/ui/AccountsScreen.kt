@@ -113,20 +113,28 @@ fun AccountsScreen(dao: MoneyDao, onBack: () -> Unit) {
     }
 
     if (confirmReimport) {
+        fun start(keep: Boolean) {
+            confirmReimport = false
+            reimporting = true
+            scope.launch(Dispatchers.IO) {
+                try { InboxScan.reimport(context, keepEdits = keep) } finally { reimporting = false }
+            }
+        }
         AlertDialog(
             onDismissRequest = { confirmReimport = false },
             icon = { Icon(Icons.Filled.Sync, null) },
-            title = { Text("Re-import from SMS?") },
-            text = { Text("Deletes everything imported from SMS, plus merges, transfer marks and corrected balances, then reads your SMS inbox again. Transactions you added by hand and your categories are kept.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmReimport = false
-                    reimporting = true
-                    scope.launch(Dispatchers.IO) {
-                        try { InboxScan.reimport(context) } finally { reimporting = false }
+            title = { Text("Re-import from SMS") },
+            text = {
+                Column {
+                    Text("Reads your SMS inbox again with the latest rules. Transactions you added by hand and your categories are always kept.")
+                    Text("Keep the changes you made yourself — categories you picked, transfers you marked or unlinked, merged accounts and corrected balances — or overwrite them with what the SMS say?",
+                        Modifier.padding(top = 12.dp))
+                    TextButton(onClick = { start(keep = false) }, modifier = Modifier.padding(top = 8.dp)) {
+                        Text("Overwrite my changes", color = MaterialTheme.colorScheme.error)
                     }
-                }) { Text("Re-import") }
+                }
             },
+            confirmButton = { TextButton(onClick = { start(keep = true) }) { Text("Keep my changes") } },
             dismissButton = { TextButton(onClick = { confirmReimport = false }) { Text("Cancel") } },
         )
     }

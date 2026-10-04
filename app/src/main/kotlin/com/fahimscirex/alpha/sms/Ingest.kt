@@ -99,8 +99,61 @@ object Ingest {
 
     const val CASH = "Cash"
 
-    /** Runs [block] while no SMS is being ingested, e.g. to wipe the database. */
-    suspend fun exclusive(block: suspend () -> Unit) = lock.withLock { block() }
+    /**
+     * Rebuilds everything derived from SMS by running [replay] (the inbox scan) on a cleared slate.
+     * Manual transactions are always kept. With [keepEdits] the user's own changes survive:
+     * category picks and transfer marks/unlinks are re-applied by transaction hash, merges stay,
+     * and an account balance newer than any replayed SMS (a correction) is put back. Without it
+     * those are discarded too.
+     */
+    suspend fun rebuild(dao: MoneyDao, keepEdits: Boolean, replay: suspend () -> Unit) {
+        var edits = emptyList<com.fahimscirex.alpha.data.UserEdit>()
+        var balances = emptyList<Account>()
+        lock.withLock {
+            if (keepEdits) {
+                edits = dao.userEdits()
+                balances = dao.allAccounts()
+                dao.deleteSmsTxns()
+                dao.clearAutoLinks()
+                dao.resetBalances()
+            } else {
+                dao.deleteSmsTxns()
+                dao.clearLinks()
+                dao.forgetUserEdits()
+                dao.deleteUnusedAccounts()
+                dao.resetAccounts()
+            }
+            dao.deleteUnparsedAll()
+        }
+        replay()
+        if (!keepEdits) return
+        lock.withLock {
+            for (e in edits) if (e.userCategory) dao.restoreCategory(e.hash, e.categoryId)
+            for (e in edits) if (e.userLink) restoreLink(dao, e)
+            val now = dao.allAccounts().associateBy { it.id }
+            for (old in balances) {
+                val replayed = now[old.id] ?: continue
+                if (old.balance != null && old.balanceAt > replayed.balanceAt) dao.setBalance(old.id, old.balance, old.balanceAt)
+            }
+        }
+    }
+
+    /** Puts a user-set transfer state back, detaching whatever the replay linked instead. */
+    private suspend fun restoreLink(dao: MoneyDao, e: com.fahimscirex.alpha.data.UserEdit) {
+        val x = dao.byHash(e.hash) ?: return
+        suspend fun detach(t: Txn) { t.transferOf?.takeIf { it != t.id }?.let { dao.setLink(it, null, false) } }
+        detach(x)
+        val partner = e.partnerHash?.takeIf { it != e.hash }?.let { dao.byHash(it) }
+        when {
+            e.partnerHash == e.hash -> dao.setLink(x.id, x.id, true)
+            partner == null -> dao.setLink(x.id, null, true)
+            else -> {
+                dao.byHash(partner.hash)?.let { detach(it) }
+                dao.setLink(x.id, partner.id, true)
+                dao.setLink(partner.id, x.id, true)
+            }
+        }
+    }
 
     /** Merges [from] into [into]: its transactions move over and its number resolves to [into] from now on. */
     suspend fun merge(dao: MoneyDao, from: Account, into: Account) = lock.withLock { mergeLocked(dao, from, into) }

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -55,9 +56,23 @@ data class Txn(
     /** Signed taka value of a foreign-currency transaction, when known; null for BDT ones. */
     val bdtAmount: Long? = null,
     val categoryId: Long? = null,
+    /** The user picked [categoryId] (not a rule); a re-import that keeps edits restores it. */
+    @ColumnInfo(defaultValue = "0") val userCategory: Boolean = false,
+    /** The user set [transferOf] (marked or unlinked); a re-import that keeps edits restores it. */
+    @ColumnInfo(defaultValue = "0") val userLink: Boolean = false,
 )
 
-/** A spending/income category; [emoji] is its icon, so users can pick any without assets. */
+/** A user's change to one transaction, keyed by its stable [hash] so it survives a rebuild. */
+data class UserEdit(
+    val hash: String,
+    val categoryId: Long?,
+    val userCategory: Boolean,
+    val userLink: Boolean,
+    /** Hash of the linked transaction; equal to [hash] when marked a transfer by hand. */
+    val partnerHash: String?,
+)
+
+/** A category; [emoji] is its icon, so users can pick any without assets. */
 @Entity
 data class Category(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -228,7 +243,8 @@ interface MoneyDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(rule: CategoryRule): Long
 
-    @Query("UPDATE Txn SET categoryId = :categoryId WHERE id = :id")
+    /** The user's category choice. */
+    @Query("UPDATE Txn SET categoryId = :categoryId, userCategory = 1 WHERE id = :id")
     suspend fun setCategory(id: Long, categoryId: Long?)
 
     /** Re-categorizes every transaction from [merchant], for "always use this category". */
@@ -248,10 +264,10 @@ interface MoneyDao {
     fun transferred(from: Long, to: Long): Flow<Long>
 
     /** Marks a transaction as a transfer between own accounts when no counterpart SMS exists. */
-    @Query("UPDATE Txn SET transferOf = id WHERE id = :id")
+    @Query("UPDATE Txn SET transferOf = id, userLink = 1 WHERE id = :id")
     suspend fun markTransfer(id: Long)
 
-    @Query("UPDATE Txn SET transferOf = NULL WHERE id IN (:a, :b)")
+    @Query("UPDATE Txn SET transferOf = NULL, userLink = 1 WHERE id IN (:a, :b)")
     suspend fun unlink(a: Long, b: Long)
 
     /** Deletes a transaction, unlinking whatever was paired with it. */
@@ -277,6 +293,35 @@ interface MoneyDao {
     @Query("UPDATE Account SET balance = NULL, balanceAt = 0, mergedInto = NULL")
     suspend fun resetAccounts()
 
+    @Query("UPDATE Txn SET userCategory = 0, userLink = 0")
+    suspend fun forgetUserEdits()
+
+    // Re-import that keeps the user's changes (see Ingest.rebuild).
+    @Query(
+        """SELECT hash, categoryId, userCategory, userLink, (SELECT o.hash FROM Txn o WHERE o.id = t.transferOf) AS partnerHash
+           FROM Txn t WHERE userCategory = 1 OR userLink = 1"""
+    )
+    suspend fun userEdits(): List<UserEdit>
+
+    @Query("SELECT * FROM Account")
+    suspend fun allAccounts(): List<Account>
+
+    /** Clears balances for a replay, keeping merges. */
+    @Query("UPDATE Account SET balance = NULL, balanceAt = 0")
+    suspend fun resetBalances()
+
+    @Query("UPDATE Txn SET transferOf = NULL WHERE userLink = 0")
+    suspend fun clearAutoLinks()
+
+    @Query("SELECT * FROM Txn WHERE hash = :hash")
+    suspend fun byHash(hash: String): Txn?
+
+    @Query("UPDATE Txn SET transferOf = :transferOf, userLink = :user WHERE id = :id")
+    suspend fun setLink(id: Long, transferOf: Long?, user: Boolean)
+
+    @Query("UPDATE Txn SET categoryId = :categoryId, userCategory = 1 WHERE hash = :hash")
+    suspend fun restoreCategory(hash: String, categoryId: Long?)
+
     @Query("SELECT * FROM UnparsedSms")
     suspend fun unparsed(): List<UnparsedSms>
 
@@ -289,7 +334,7 @@ interface MoneyDao {
 
 @Database(
     entities = [Account::class, Txn::class, UnparsedSms::class, Category::class, CategoryRule::class],
-    version = 4, exportSchema = false,
+    version = 5, exportSchema = false,
 )
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): MoneyDao
@@ -320,9 +365,16 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE Txn ADD COLUMN userCategory INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE Txn ADD COLUMN userLink INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "alpha.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .addCallback(object : Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) = seedCategories(db)
                 })
