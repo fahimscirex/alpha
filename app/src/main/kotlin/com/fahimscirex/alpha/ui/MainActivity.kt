@@ -17,7 +17,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
@@ -90,6 +97,24 @@ class MainActivity : ComponentActivity() {
 
 private val dayFormat = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault())
 private val dateFormat = SimpleDateFormat("d MMM yyyy", Locale.getDefault())
+
+// The date picker works in UTC days ("midnight UTC of the chosen date"), the app in local time.
+private val utc = java.util.TimeZone.getTimeZone("UTC")
+private val pickerDateFormat = SimpleDateFormat("d MMM yyyy", Locale.getDefault()).apply { timeZone = utc }
+private fun dayKey(tz: java.util.TimeZone) = SimpleDateFormat("yyyyMMdd", Locale.US).apply { timeZone = tz }
+
+/** Today's local date as the picker's UTC-midnight value (BD after midnight is still yesterday in UTC). */
+private fun pickerDay(now: Long): Long = dayKey(utc).parse(dayKey(java.util.TimeZone.getDefault()).format(Date(now)))!!.time
+
+/**
+ * Timestamp for an entry on the picked day: now when it is today, so it counts as newer than
+ * balances stated earlier today; otherwise local noon of that day.
+ */
+private fun entryTime(picked: Long): Long {
+    val now = System.currentTimeMillis()
+    if (picked == pickerDay(now)) return now
+    return dayKey(java.util.TimeZone.getDefault()).parse(dayKey(utc).format(Date(picked)))!!.time + 12 * 3_600_000L
+}
 private val monthFormat = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
 
 /** Shortcut: shows minor units as major with 2 decimals; real formatting comes with multi-currency. */
@@ -106,6 +131,7 @@ private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
     val transferred by remember(from) { dao.transferred(from, to) }.collectAsStateWithLifecycle(0L)
     val unparsed by dao.unparsedCount().collectAsStateWithLifecycle(0)
     var selected by remember { mutableStateOf<TxnRow?>(null) }
+    var adding by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -114,6 +140,7 @@ private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
             Text(monthFormat.format(Date(from)), style = MaterialTheme.typography.titleMedium)
             TextButton(onClick = { offset++ }, enabled = offset < 0) { Text("›") }
             Spacer(Modifier.weight(1f))
+            TextButton(onClick = { adding = true }) { Text("Add") }
             TextButton(onClick = onAccounts) { Text("Accounts") }
         }
         Text("Spent", style = MaterialTheme.typography.labelLarge)
@@ -148,8 +175,81 @@ private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
                     }
                 }) { Text(if (linked) "Not a transfer" else "Mark as transfer") }
             },
-            dismissButton = { TextButton(onClick = { selected = null }) { Text("Cancel") } },
+            dismissButton = {
+                Row {
+                    if (t.source == "MANUAL") TextButton(onClick = {
+                        selected = null
+                        scope.launch(Dispatchers.IO) { dao.unlinkFrom(t.id); dao.deleteTxn(t.id) }
+                    }) { Text("Delete") }
+                    TextButton(onClick = { selected = null }) { Text("Cancel") }
+                }
+            },
         )
+    }
+
+    if (adding) AddTxnDialog(dao, onDone = { adding = false })
+}
+
+/** Manual entry for money the SMS never mentioned: cash, app-only payments, back-dated fixes. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddTxnDialog(dao: MoneyDao, onDone: () -> Unit) {
+    val accounts by dao.visibleAccounts().collectAsStateWithLifecycle(emptyList())
+    var spent by remember { mutableStateOf(true) }
+    var amountText by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    // null = Cash wallet (created on first use if it does not exist yet).
+    var accountId by remember { mutableStateOf<Long?>(null) }
+    val datePicker = rememberDatePickerState(initialSelectedDateMillis = pickerDay(System.currentTimeMillis()))
+    var pickingDate by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val amount = amountText.replace(",", "").toBigDecimalOrNull()?.takeIf { it.signum() > 0 && it.scale() <= 2 }
+    val cash = accounts.firstOrNull { it.provider == Ingest.CASH && it.number.isEmpty() }
+    val choices = listOf<Pair<Long?, String>>((cash?.id) to Ingest.CASH) +
+        accounts.filter { it.id != cash?.id }.map { it.id to label(it.provider, it.number) }
+
+    AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text("Add transaction") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(spent, { spent = true }); Text("Spent")
+                    RadioButton(!spent, { spent = false }); Text("Received")
+                }
+                OutlinedTextField(amountText, { amountText = it }, label = { Text("Amount") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                OutlinedTextField(description, { description = it }, label = { Text("Description") }, singleLine = true)
+                TextButton(onClick = { pickingDate = true }) {
+                    Text("Date: ${pickerDateFormat.format(Date(datePicker.selectedDateMillis ?: pickerDay(System.currentTimeMillis())))}")
+                }
+                Text("Account", style = MaterialTheme.typography.labelLarge)
+                choices.forEach { (id, name) ->
+                    val chosen = accountId == id || (accountId == null && id == cash?.id)
+                    Row(Modifier.fillMaxWidth().clickable { accountId = id }, verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(chosen, { accountId = id }); Text(name)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = amount != null, onClick = {
+                val minor = amount!!.movePointRight(2).toLong() * if (spent) -1 else 1
+                val timestamp = entryTime(datePicker.selectedDateMillis ?: pickerDay(System.currentTimeMillis()))
+                onDone()
+                scope.launch(Dispatchers.IO) {
+                    Ingest.addManual(dao, accountId, minor, description.trim().ifEmpty { null }, timestamp)
+                }
+            }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+    )
+
+    if (pickingDate) {
+        DatePickerDialog(
+            onDismissRequest = { pickingDate = false },
+            confirmButton = { TextButton(onClick = { pickingDate = false }) { Text("OK") } },
+        ) { DatePicker(datePicker) }
     }
 }
 
@@ -214,7 +314,7 @@ private fun AccountsScreen(dao: MoneyDao) {
         AlertDialog(
             onDismissRequest = { confirmReimport = false },
             title = { Text("Re-import from SMS?") },
-            text = { Text("Deletes all transactions, merged accounts and manual changes, then reads your SMS inbox again.") },
+            text = { Text("Deletes everything imported from SMS, plus merges, transfer marks and corrected balances, then reads your SMS inbox again. Transactions you added by hand are kept.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmReimport = false

@@ -79,6 +79,21 @@ object Ingest {
         return (minor(balance) - before).takeIf { it != 0L && (it > 0) == (sign > 0) }
     }
 
+    /**
+     * Records a transaction entered by hand. [accountId] null means the Cash wallet, created on
+     * first use. A known account balance moves with it only when the entry is not older than
+     * that balance, so back-dating an expense never disturbs a balance stated later.
+     */
+    suspend fun addManual(dao: MoneyDao, accountId: Long?, amount: Long, description: String?, timestamp: Long) =
+        lock.withLock {
+            val account = accountId?.let { dao.account(it) } ?: account(dao, CASH, "", "BDT")
+            dao.insert(Txn(hash = "manual:${java.util.UUID.randomUUID()}", accountId = account.id, amount = amount,
+                currency = account.currency, merchant = description, timestamp = timestamp, source = "MANUAL"))
+            dao.adjustBalance(account.id, amount, timestamp)
+        }
+
+    const val CASH = "Cash"
+
     /** Runs [block] while no SMS is being ingested, e.g. to wipe the database. */
     suspend fun exclusive(block: suspend () -> Unit) = lock.withLock { block() }
 

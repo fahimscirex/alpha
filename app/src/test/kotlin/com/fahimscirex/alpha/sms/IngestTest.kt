@@ -151,6 +151,26 @@ class IngestTest {
     }
 
     @Test
+    fun `manual entries go to Cash by default and move only balances older than them`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "NAGAD", "Add Money from Bank is Successful. From: Eastern Bank PLC. Amount: Tk 3200.0 TxnID: 75AAAAAA Balance: Tk 3213.09 20/07/2026 14:46", 10 * min)
+        val nagad = dao.accounts.single()
+        // Back-dated expense before the balance SMS: the balance stays as stated.
+        Ingest.addManual(dao, nagad.id, -100_00L, "Old", 5 * min)
+        assertEquals(321_309L, dao.accounts.single().balance)
+        // Expense after it: the balance drops.
+        Ingest.addManual(dao, nagad.id, -3_213_09L, "Nagad app payment", 20 * min)
+        assertEquals(0L, dao.accounts.single { it.id == nagad.id }.balance)
+        // No account given: a Cash wallet appears; its balance stays unknown.
+        Ingest.addManual(dao, null, -50_00L, "Tea", 30 * min)
+        val cash = dao.accounts.single { it.provider == Ingest.CASH }
+        assertEquals(cash.id, dao.txns.last().accountId)
+        assertEquals("MANUAL", dao.txns.last().source)
+        assertNull(cash.balance)
+        assertEquals(100_00L + 3_213_09L + 50_00L, dao.spent())
+    }
+
+    @Test
     fun `bKash fee is a separate expense`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "bKash", "Send Money Tk 500.00 to 01800000000 successful. Ref 1. Fee Tk 5.00. Balance Tk 745.28. TrxID AAA0000005 at 03/02/2026 17:18", min)
@@ -214,6 +234,16 @@ internal class FakeDao : MoneyDao {
     override fun unparsedCount(): Flow<Int> = flowOf(unparsed.size)
     override fun transferred(from: Long, to: Long): Flow<Long> = flowOf(0)
     override suspend fun markTransfer(id: Long) { linkTransfer(id, id) }
+    override suspend fun adjustBalance(id: Long, delta: Long, at: Long) {
+        accounts.replaceAll { if (it.id == id && it.balance != null && it.balanceAt <= at) it.copy(balance = it.balance + delta, balanceAt = at) else it }
+    }
+    override suspend fun unlinkFrom(id: Long) { txns.replaceAll { if (it.transferOf == id) it.copy(transferOf = null) else it } }
+    override suspend fun deleteTxn(id: Long) { txns.removeAll { it.id == id } }
+    override suspend fun deleteSmsTxns() { txns.removeAll { it.source != "MANUAL" } }
+    override suspend fun clearLinks() { txns.replaceAll { it.copy(transferOf = null) } }
+    override suspend fun deleteUnparsedAll() { unparsed.clear() }
+    override suspend fun deleteUnusedAccounts() { accounts.removeAll { a -> txns.none { it.accountId == a.id } } }
+    override suspend fun resetAccounts() { accounts.replaceAll { it.copy(balance = null, balanceAt = 0, mergedInto = null) } }
     override suspend fun unlink(a: Long, b: Long) {
         txns.replaceAll { if (it.id == a || it.id == b) it.copy(transferOf = null) else it }
     }

@@ -13,10 +13,18 @@ object InboxScan {
     private const val PREFS = "scan"
     private const val KEY_LAST = "last"
 
-    /** Deletes everything imported (and any manual changes) and imports the inbox again. */
+    /**
+     * Deletes everything imported from SMS, plus merges, transfer marks and balances, then
+     * imports the inbox again. Transactions entered by hand are kept.
+     */
     suspend fun reimport(context: Context) {
+        val dao = AppDb.get(context).dao()
         Ingest.exclusive {
-            AppDb.get(context).clearAllTables()
+            dao.deleteSmsTxns()
+            dao.clearLinks()
+            dao.deleteUnparsedAll()
+            dao.deleteUnusedAccounts()
+            dao.resetAccounts()
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
         }
         run(context)

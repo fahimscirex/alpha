@@ -75,6 +75,8 @@ data class TxnRow(
     val number: String,
     val transferOf: Long?,
     val bdtAmount: Long?,
+    /** "SMS" or "MANUAL". */
+    val source: String,
     /** The linked other half is on the same account: a reversal, not a transfer. */
     val reversed: Boolean,
 )
@@ -126,6 +128,10 @@ interface MoneyDao {
     @Query("UPDATE Account SET balance = :balance, balanceAt = :at WHERE id = :id")
     suspend fun setBalance(id: Long, balance: Long, at: Long)
 
+    /** Moves a known balance by [delta] for an entry dated at or after it; unknown balances stay unknown. */
+    @Query("UPDATE Account SET balance = balance + :delta, balanceAt = :at WHERE id = :id AND balance IS NOT NULL AND balanceAt <= :at")
+    suspend fun adjustBalance(id: Long, delta: Long, at: Long)
+
     @Query("UPDATE Account SET balance = :balance, balanceAt = :at WHERE id = :id AND balanceAt <= :at")
     suspend fun updateBalance(id: Long, balance: Long, at: Long)
 
@@ -137,7 +143,7 @@ interface MoneyDao {
     suspend fun insert(sms: UnparsedSms): Long
 
     @Query(
-        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount,
+        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount, t.source,
                   COALESCE((SELECT o.accountId FROM Txn o WHERE o.id = t.transferOf AND o.id != t.id) = t.accountId, 0) AS reversed
            FROM Txn t JOIN Account a ON a.id = t.accountId
            WHERE t.timestamp >= :from AND t.timestamp < :to ORDER BY t.timestamp DESC"""
@@ -167,6 +173,29 @@ interface MoneyDao {
 
     @Query("UPDATE Txn SET transferOf = NULL WHERE id IN (:a, :b)")
     suspend fun unlink(a: Long, b: Long)
+
+    /** Deletes a transaction, unlinking whatever was paired with it. */
+    @Query("UPDATE Txn SET transferOf = NULL WHERE transferOf = :id")
+    suspend fun unlinkFrom(id: Long)
+
+    @Query("DELETE FROM Txn WHERE id = :id")
+    suspend fun deleteTxn(id: Long)
+
+    // Re-import: drop everything derived from SMS but keep transactions entered by hand.
+    @Query("DELETE FROM Txn WHERE source != 'MANUAL'")
+    suspend fun deleteSmsTxns()
+
+    @Query("UPDATE Txn SET transferOf = NULL")
+    suspend fun clearLinks()
+
+    @Query("DELETE FROM UnparsedSms")
+    suspend fun deleteUnparsedAll()
+
+    @Query("DELETE FROM Account WHERE id NOT IN (SELECT accountId FROM Txn)")
+    suspend fun deleteUnusedAccounts()
+
+    @Query("UPDATE Account SET balance = NULL, balanceAt = 0, mergedInto = NULL")
+    suspend fun resetAccounts()
 
     @Query("SELECT * FROM UnparsedSms")
     suspend fun unparsed(): List<UnparsedSms>
