@@ -28,6 +28,7 @@ data class ParsedTransaction(
     val bankName: String,
     val transactionHash: String? = null,
     val isFromCard: Boolean = false,
+    /** Currency of [amount]. [balance] is always in the account's own currency (BDT). */
     val currency: String = "BDT",
     val fromAccount: String? = null,
     val toAccount: String? = null,

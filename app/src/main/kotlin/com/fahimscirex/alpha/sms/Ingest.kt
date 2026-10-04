@@ -38,11 +38,14 @@ object Ingest {
                 return@withLock
             }
         }
-        val account = account(dao, t.bankName, t.accountLast4.orEmpty(), t.currency)
+        // The account is in the bank's own currency even when a purchase is in USD.
+        val account = account(dao, t.bankName, t.accountLast4.orEmpty(), parser.getCurrency())
         t.cardLast4?.let { linkCard(dao, t.bankName, it, account) }
         val hash = t.generateTransactionId()
-        val txn = Txn(hash = hash, accountId = account.id, amount = sign * minor(t.amount), currency = t.currency,
-            merchant = t.merchant, timestamp = timestamp, source = "SMS")
+        val amount = sign * minor(t.amount)
+        val txn = Txn(hash = hash, accountId = account.id, amount = amount, currency = t.currency,
+            merchant = t.merchant, timestamp = timestamp, source = "SMS",
+            bdtAmount = if (t.currency != account.currency) takaCost(account, t.balance, timestamp, sign) else null)
         val id = dao.insert(txn)
         if (id > 0) linkTransfer(dao, txn.copy(id = id), account.provider)
         t.fee?.let {
@@ -53,6 +56,18 @@ object Ingest {
         if (!(t.isFromCard && t.creditCardBalanceIsAvailableCredit)) {
             t.balance?.let { dao.updateBalance(account.id, minor(it), timestamp) }
         }
+    }
+
+    /**
+     * Taka cost of a foreign-currency transaction: the drop in the account balance since the
+     * last known one, which includes the bank's FX markup. Only trusted when that balance is
+     * older than this SMS and moved in the transaction's direction; an SMS missed in between
+     * would still skew it (known limit).
+     */
+    private fun takaCost(account: Account, balance: BigDecimal?, timestamp: Long, sign: Int): Long? {
+        val before = account.balance ?: return null
+        if (balance == null || account.balanceAt >= timestamp) return null
+        return (minor(balance) - before).takeIf { it != 0L && (it > 0) == (sign > 0) }
     }
 
     /** Merges [from] into [into]: its transactions move over and its number resolves to [into] from now on. */

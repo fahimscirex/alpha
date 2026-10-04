@@ -17,6 +17,12 @@ object InboxScan {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val since = prefs.getLong(KEY_LAST, System.currentTimeMillis() - FIRST_SCAN_DAYS * 86_400_000L)
         val dao = AppDb.get(context).dao()
+        // Retry earlier failures first: an app update may have taught the parser their format.
+        // A row that still fails is re-added by Ingest.
+        for (sms in dao.unparsed()) {
+            dao.deleteUnparsed(sms.id)
+            Ingest.sms(dao, sms.sender, sms.body, sms.timestamp)
+        }
         var last = since
         context.contentResolver.query(
             Telephony.Sms.Inbox.CONTENT_URI,

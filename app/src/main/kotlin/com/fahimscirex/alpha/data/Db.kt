@@ -49,6 +49,8 @@ data class Txn(
     val note: String? = null,
     /** Id of the other half when this is one side of a transfer between own accounts. */
     val transferOf: Long? = null,
+    /** Signed taka value of a foreign-currency transaction, when known; null for BDT ones. */
+    val bdtAmount: Long? = null,
 )
 
 /** SMS from a known sender that looked financial but failed to parse; shown for parser fixes. */
@@ -69,6 +71,7 @@ data class TxnRow(
     val provider: String,
     val number: String,
     val transferOf: Long?,
+    val bdtAmount: Long?,
 )
 
 /** A transfer candidate: an unlinked transaction plus its account's provider. */
@@ -116,20 +119,31 @@ interface MoneyDao {
     suspend fun insert(sms: UnparsedSms): Long
 
     @Query(
-        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf
+        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount
            FROM Txn t JOIN Account a ON a.id = t.accountId
            WHERE t.timestamp >= :from AND t.timestamp < :to ORDER BY t.timestamp DESC"""
     )
     fun txns(from: Long, to: Long): Flow<List<TxnRow>>
 
-    @Query("SELECT COALESCE(SUM(-amount), 0) FROM Txn WHERE amount < 0 AND transferOf IS NULL AND currency = 'BDT' AND timestamp >= :from AND timestamp < :to")
+    /** Taka spent: BDT transactions plus foreign ones whose taka value is known. */
+    @Query(
+        """SELECT COALESCE(SUM(-COALESCE(bdtAmount, amount)), 0) FROM Txn
+           WHERE amount < 0 AND transferOf IS NULL AND (currency = 'BDT' OR bdtAmount IS NOT NULL)
+             AND timestamp >= :from AND timestamp < :to"""
+    )
     fun spent(from: Long, to: Long): Flow<Long>
+
+    @Query("SELECT * FROM UnparsedSms")
+    suspend fun unparsed(): List<UnparsedSms>
+
+    @Query("DELETE FROM UnparsedSms WHERE id = :id")
+    suspend fun deleteUnparsed(id: Long)
 
     @Query("SELECT COUNT(*) FROM UnparsedSms")
     fun unparsedCount(): Flow<Int>
 }
 
-@Database(entities = [Account::class, Txn::class, UnparsedSms::class], version = 2, exportSchema = false)
+@Database(entities = [Account::class, Txn::class, UnparsedSms::class], version = 3, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): MoneyDao
 
@@ -143,9 +157,15 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE Txn ADD COLUMN bdtAmount INTEGER")
+            }
+        }
+
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "alpha.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build().also { instance = it }
         }
     }

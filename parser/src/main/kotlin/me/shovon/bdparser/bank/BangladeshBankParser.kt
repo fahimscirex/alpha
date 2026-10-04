@@ -49,12 +49,13 @@ abstract class BangladeshBankParser : BankParser() {
     override fun getCurrency(): String = "BDT"
 
     /**
-     * Every amount pattern in the bank parsers assumes taka, so a card alert for a foreign
-     * purchase ("USD 12.99 ...") must not parse at all rather than record dollars as taka.
+     * Most amount patterns in the bank parsers assume taka, so a card alert for a foreign
+     * purchase ("USD 12.99 ...") must not parse at all rather than record dollars as taka,
+     * unless the parser reads the currency itself ([extractCurrency]).
      * Callers keep unparsed SMS from known senders for review.
      */
     override fun parse(smsBody: String, sender: String, timestamp: Long): ParsedTransaction? {
-        if (foreignAmountPattern.containsMatchIn(smsBody)) return null
+        if (foreignAmountPattern.containsMatchIn(smsBody) && extractCurrency(smsBody) == null) return null
         return super.parse(smsBody, sender, timestamp)
     }
 

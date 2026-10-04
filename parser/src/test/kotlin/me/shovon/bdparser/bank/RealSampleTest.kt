@@ -79,8 +79,19 @@ class RealSampleTest {
     }
 
     @Test
-    fun `foreign-currency bank alert is rejected rather than recorded as taka`() {
-        assertNull(parse("EBL", "Purchase txn USD 12.99 from NETFLIX.COM.Card 452017**0001 on 01-Oct-26 01:42:16 PM BST. EBL Helpline 16230"))
+    fun `EBL foreign purchase keeps its currency and the BDT account balance`() {
+        val t = parse("EBL", "Purchase txn USD3.99 from NETFLIX.COM SINGAP.Card 4520170001 on 04-Oct-26 03:52:08 AM BST.Your A/C 1230456 Balance BDT 43417.94. EBL Helpline 16230")!!
+        assertEquals(EXPENSE, t.type)
+        assertEquals(BigDecimal("3.99"), t.amount)
+        assertEquals("USD", t.currency)
+        assertEquals("NETFLIX.COM SINGAP", t.merchant)
+        assertEquals("0456", t.accountLast4)
+        assertEquals(BigDecimal("43417.94"), t.balance)
+    }
+
+    @Test
+    fun `foreign-currency bank alert in an unknown shape is rejected rather than recorded as taka`() {
+        assertNull(parse("EBL", "QR txn USD 5 through EBL Skybanking at SOME SHOP from Card 452017**0001 on 01-Oct-26 01:42:16 PM BST. EBL Helpline 16230"))
     }
 
     @Test

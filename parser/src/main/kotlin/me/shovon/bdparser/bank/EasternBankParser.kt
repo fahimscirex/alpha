@@ -29,6 +29,8 @@ import me.shovon.bdparser.SimpleDate
  * - "[EBL CARDS: ]Payment of BDT X credited to Card <masked> on <date> <time> [BST]. Balance: BDT Y."
  * - "[EBL CARDS: ]Purchase txn BDT X from <merchant>. Card <masked> on <date> <time> [BST]. Balance: BDT Y."
  * - "Purchase txn BDT X from <merchant> <terminal>.Card <n> on <date> ... Your A/C <n> Balance BDT Y." (debit card)
+ * - "Purchase txn USD3.99 from <merchant>.Card <n> on <date> ... Your A/C <n> Balance BDT Y." (foreign
+ *   purchase: the amount is in USD, the balance stays in the account's BDT)
  * - "QR txn BDT X through EBL Skybanking at <merchant> from Card <masked> on <date> ..."
  *
  * The trailing "Balance: BDT Y" is parsed into [me.shovon.bdparser.ParsedTransaction.balance]
@@ -122,10 +124,11 @@ class EasternBankParser : BangladeshBankParser() {
         RegexOption.IGNORE_CASE
     )
 
+    // Purchases name their currency: "Purchase txn USD3.99 from NETFLIX.COM SINGAP.Card ...".
     // "Purchase txn BDT X from <merchant>. Card <masked> on ... Balance: BDT Y."            (credit card)
     // "Purchase txn BDT X from <merchant> <terminal>.Card <n> on ... Your A/C <n> Balance BDT Y." (debit card)
     private val cardsPurchasePattern = Regex(
-        """${cardsPrefix}Purchase txn\s+BDT\s*$takaFigure\s+from\s+(.+?)\.\s*Card\s+[0-9*]+""",
+        """${cardsPrefix}Purchase txn\s+([A-Z]{3})\s*$takaFigure\s+from\s+(.+?)\.\s*Card\s+[0-9*]+""",
         RegexOption.IGNORE_CASE
     )
 
@@ -153,7 +156,8 @@ class EasternBankParser : BangladeshBankParser() {
         val amount: String,
         val type: TransactionType,
         val merchant: String?,
-        val balance: String?
+        val balance: String?,
+        val currency: String = "BDT"
     )
 
     private fun match(message: String): Match? {
@@ -184,8 +188,9 @@ class EasternBankParser : BangladeshBankParser() {
             return Match(it.groupValues[1], TransactionType.INCOME, null, cardBalance(message))
         }
         cardsPurchasePattern.find(message)?.let {
-            val merchant = it.groupValues[2].trim().replace(trailingTerminalId, "")
-            return Match(it.groupValues[1], TransactionType.EXPENSE, merchant, cardBalance(message))
+            val merchant = it.groupValues[3].trim().replace(trailingTerminalId, "")
+            return Match(it.groupValues[2], TransactionType.EXPENSE, merchant, cardBalance(message),
+                it.groupValues[1].uppercase())
         }
         cardsQrPattern.find(message)?.let {
             return Match(it.groupValues[1], TransactionType.EXPENSE, it.groupValues[2].trim(), null)
@@ -208,6 +213,8 @@ class EasternBankParser : BangladeshBankParser() {
         match(message)?.balance?.let { parseTakaAmount(it) }
 
     override fun extractTransactionType(message: String): TransactionType? = match(message)?.type
+
+    override fun extractCurrency(message: String): String? = match(message)?.currency
 
     override fun extractMerchant(message: String, sender: String): String? = match(message)?.merchant
 

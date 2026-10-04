@@ -174,7 +174,7 @@ abstract class BankParser {
             timestamp = timestamp,
             bankName = getBankName(),
             isFromCard = detectIsCard(smsBody),
-            currency = getCurrency(),
+            currency = extractCurrency(smsBody) ?: getCurrency(),
             fee = extractFee(smsBody)?.takeIf { it.signum() > 0 },
             cardLast4 = extractLinkedCardLast4(smsBody),
             creditCardBalanceIsAvailableCredit = creditCardBalanceIsAvailableCredit()
@@ -187,6 +187,9 @@ abstract class BankParser {
      *
      * Subclasses should override this to add bank-specific detection.
      */
+    /** Currency of the amount for formats that state it per message; null means [getCurrency]. */
+    protected open fun extractCurrency(message: String): String? = null
+
     /** Card digits for SMS that name a card alongside the account in [extractAccountLast4]. */
     protected open fun extractLinkedCardLast4(message: String): String? = null
 
@@ -298,19 +301,6 @@ abstract class BankParser {
         
         // Final fallback to SmsFilter for broad pattern matching
         return hasKeyword || SmsFilter.isTransactionMessage(message)
-    }
-
-    /**
-     * Extracts the transaction currency from the message.
-     * Can be overridden by specific bank parsers for custom logic.
-     */
-    protected open fun extractCurrency(message: String): String? {
-        // Default implementation - try to find currency pattern
-        val currencyPattern = Regex("""([A-Z]{3})\s*[0-9,]+(?:\.\d{2})?""", RegexOption.IGNORE_CASE)
-        currencyPattern.find(message)?.let { match ->
-            return match.groupValues[1].uppercase()
-        }
-        return null
     }
 
     /**

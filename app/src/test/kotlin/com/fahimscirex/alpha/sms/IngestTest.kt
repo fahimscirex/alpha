@@ -51,6 +51,21 @@ class IngestTest {
     }
 
     @Test
+    fun `USD card purchase stays on the BDT account with its taka cost from the balance drop`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "EBL", "AC 123***456 is debited with BDT 400 as EBL Skybanking MFS Transfer-bKash on 01-OCT-26 03:48:17 PM Balance is BDT 43900.00 Thanks. EBL Helpline 16230", 1 * min)
+        Ingest.sms(dao, "EBL", "Purchase txn USD3.99 from NETFLIX.COM SINGAP.Card 4520170001 on 04-Oct-26 03:52:08 AM BST.Your A/C 1230456 Balance BDT 43417.94. EBL Helpline 16230", 2 * min)
+
+        assertEquals(1, dao.accounts.count { it.mergedInto == null })
+        val netflix = dao.txns.last()
+        assertEquals("USD", netflix.currency)
+        assertEquals(-399L, netflix.amount)
+        assertEquals(-48_206L, netflix.bdtAmount)
+        assertEquals(4_341_794L, dao.accounts.first { it.mergedInto == null }.balance)
+        assertEquals(40_000L + 48_206L, dao.spent())
+    }
+
+    @Test
     fun `bKash fee is a separate expense`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "bKash", "Send Money Tk 500.00 to 01800000000 successful. Ref 1. Fee Tk 5.00. Balance Tk 745.28. TrxID AAA0000005 at 03/02/2026 17:18", min)
@@ -63,7 +78,8 @@ private class FakeDao : MoneyDao {
     val txns = mutableListOf<Txn>()
     val unparsed = mutableListOf<UnparsedSms>()
 
-    fun spent() = txns.filter { it.amount < 0 && it.transferOf == null }.sumOf { -it.amount }
+    fun spent() = txns.filter { it.amount < 0 && it.transferOf == null && (it.currency == "BDT" || it.bdtAmount != null) }
+        .sumOf { -(it.bdtAmount ?: it.amount) }
 
     override suspend fun accounts(provider: String) = accounts.filter { it.provider == provider }
     override suspend fun account(id: Long) = accounts.first { it.id == id }
@@ -97,6 +113,8 @@ private class FakeDao : MoneyDao {
         return id
     }
     override suspend fun insert(sms: UnparsedSms): Long { unparsed += sms; return unparsed.size.toLong() }
+    override suspend fun unparsed(): List<UnparsedSms> = unparsed.toList()
+    override suspend fun deleteUnparsed(id: Long) { unparsed.removeAll { it.id == id } }
     override fun txns(from: Long, to: Long): Flow<List<TxnRow>> = flowOf(emptyList())
     override fun spent(from: Long, to: Long): Flow<Long> = flowOf(spent())
     override fun unparsedCount(): Flow<Int> = flowOf(unparsed.size)

@@ -117,8 +117,11 @@ private fun TxnItem(t: TxnRow) {
             val transfer = if (t.transferOf != null) "Transfer · " else ""
             Text("$transfer$account · ${dayFormat.format(Date(t.timestamp))}", style = MaterialTheme.typography.bodySmall)
         }
-        Text(money(t.amount, t.currency), style = MaterialTheme.typography.bodyLarge,
-            color = if (t.amount < 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary)
+        Column(horizontalAlignment = Alignment.End) {
+            Text(money(t.amount, t.currency), style = MaterialTheme.typography.bodyLarge,
+                color = if (t.amount < 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary)
+            t.bdtAmount?.let { Text("≈ ${money(it, "BDT")}", style = MaterialTheme.typography.bodySmall) }
+        }
     }
 }
 
