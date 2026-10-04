@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -26,6 +27,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -83,6 +85,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private val dayFormat = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault())
+private val monthFormat = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
 
 /** Shortcut: shows minor units as major with 2 decimals; real formatting comes with multi-currency. */
 private fun money(minor: Long, currency: String) =
@@ -90,16 +93,22 @@ private fun money(minor: Long, currency: String) =
 
 @Composable
 private fun MonthScreen(dao: MoneyDao, onAccounts: () -> Unit) {
-    val (from, to) = remember { currentMonth() }
-    val rows by dao.txns(from, to).collectAsStateWithLifecycle(emptyList())
-    val spent by dao.spent(from, to).collectAsStateWithLifecycle(0L)
+    // 0 = this month, -1 = last month, ...
+    var offset by rememberSaveable { mutableIntStateOf(0) }
+    val (from, to) = remember(offset) { month(offset) }
+    val rows by remember(from) { dao.txns(from, to) }.collectAsStateWithLifecycle(emptyList())
+    val spent by remember(from) { dao.spent(from, to) }.collectAsStateWithLifecycle(0L)
     val unparsed by dao.unparsedCount().collectAsStateWithLifecycle(0)
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Spent this month", style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+            TextButton(onClick = { offset-- }) { Text("‹") }
+            Text(monthFormat.format(Date(from)), style = MaterialTheme.typography.titleMedium)
+            TextButton(onClick = { offset++ }, enabled = offset < 0) { Text("›") }
+            Spacer(Modifier.weight(1f))
             TextButton(onClick = onAccounts) { Text("Accounts") }
         }
+        Text("Spent", style = MaterialTheme.typography.labelLarge)
         Text(money(spent, "BDT"), style = MaterialTheme.typography.headlineMedium)
         if (unparsed > 0) Text("$unparsed SMS could not be read", style = MaterialTheme.typography.bodySmall)
         LazyColumn(Modifier.padding(top = 16.dp)) {
@@ -114,7 +123,11 @@ private fun TxnItem(t: TxnRow) {
         Column(Modifier.weight(1f)) {
             Text(t.merchant ?: t.provider, style = MaterialTheme.typography.bodyLarge)
             val account = label(t.provider, t.number)
-            val transfer = if (t.transferOf != null) "Transfer · " else ""
+            val transfer = when {
+                t.transferOf == null -> ""
+                t.reversed -> "Reversed · "
+                else -> "Transfer · "
+            }
             Text("$transfer$account · ${dayFormat.format(Date(t.timestamp))}", style = MaterialTheme.typography.bodySmall)
         }
         Column(horizontalAlignment = Alignment.End) {
@@ -169,10 +182,12 @@ private fun AccountsScreen(dao: MoneyDao) {
     }
 }
 
-private fun currentMonth(): Pair<Long, Long> {
+/** Start and end of the month [offset] months from now, in local time. */
+private fun month(offset: Int): Pair<Long, Long> {
     val c = Calendar.getInstance().apply {
         set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0)
         set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        add(Calendar.MONTH, offset)
     }
     val from = c.timeInMillis
     c.add(Calendar.MONTH, 1)

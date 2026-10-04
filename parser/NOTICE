@@ -28,8 +28,8 @@ Further modifications for the alpha budget app (github.com/fahimscirex/alpha), o
   - Defaulted BankParser.getCurrency() to BDT instead of INR.
   - Bank parsers reject SMS quoting a foreign-currency amount instead of
     recording it as taka.
-  - Masked account numbers keep only the digits after the mask ("134***982"
-    is "982", not "4982").
+  - Masked account numbers keep only the digits after the mask ("123***456"
+    is "456", not "3456").
   - Eastern Bank: one pattern for every account credit/debit reason, with the
     "Balance is BDT Y" balance; card alerts with or without the "EBL CARDS:"
     prefix; debit-card purchases with the linked account balance; QR payments.

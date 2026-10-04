@@ -95,6 +95,55 @@ class RealSampleTest {
     }
 
     @Test
+    fun `EBL ATM withdrawal, card-to-beneficiary payment and reversal parse`() {
+        check("EBL", "Cash WD BDT2000 from EBL DHK CANT.KACHUKH. Card 452017**0001 on 13-Sep-23 11:15:58 AM BST.Your A/C 123**0456 Balance BDT 54321.00. EBL Helpline 16230",
+            EXPENSE, "2000", "Cash withdrawal", "0456", "54321.00")
+        check("EBL", "Payment of BDT 5000 has been credited to beneficiary using Card 452017**0001 on 05-Sep-26 08:10:11 PM. Thank You. EBL Helpline 16230",
+            EXPENSE, "5000", "Card transfer", "0001", null)
+        val r = parse("EBL", "EBL CARDS: Purchase txn USD9.99 from AMAZON PRIME PMTS Amzn.co reversed using Card 452017**0001. Ref num 123456789. EBL Helpline 16230")!!
+        assertEquals(INCOME, r.type)
+        assertEquals(BigDecimal("9.99"), r.amount)
+        assertEquals("USD", r.currency)
+        assertEquals("AMAZON PRIME PMTS Amzn.co", r.merchant)
+        assertEquals(true, r.isReversal)
+    }
+
+    @Test
+    fun `bKash shapes the keyword heuristics misread`() {
+        check("bKash", "You have received Tk 5.00 from DM0000. Fee Tk 0.00. Balance Tk 4,593.00. TrxID AAA0000006 at 09/02/2023 20:42. Cashback on Special Offer Send Money",
+            INCOME, "5.00", "Cashback", null, "4593.00")
+        check("bKash", "Remittance fund withdrawal from Payoneer account is successful. Total amount Tk 5,473.02 TrxID AAA0000007 at 01/12/2025 14:36.  Remittance Cash Out charge only 7 Tk/thousand from ATM Details: https://bka.sh/ATMCO",
+            INCOME, "5473.02", "Payoneer", null, null)
+        check("bKash", "You have received remittance. Total: Tk 11,018.75 Govt. incentive: Tk 268.75 TrxID AAA0000008 at 18/07/2026 07:39.  Remittance Cash Out charge only 7 Tk/thousand from ATM Details: https://bka.sh/ATMCO",
+            INCOME, "11018.75", "Remittance", null, null)
+        check("bKash", "Mobile Recharge request has failed. Tk 20.00 returned to your bKash Account. Balance Tk 30.00. TrxID AAA0000009 at 01/01/2024 10:00",
+            INCOME, "20.00", "Mobile Recharge", null, "30.00")
+        check("bKash", "Apni bKash-e Tk 3.50 Interest peyechhen. Fee Tk 0.35. Balance Tk 1,234.56. TrxID AAA0000010 at 01/07/2024 10:00. Helpline 16247. Interest for Jan-Jun 2024",
+            INCOME, "3.50", "Interest", null, "1234.56", fee = "0.35")
+        check("bKash", "bKash to Bank of Tk 2,500.00 for VISA Debit Card is successful. Fee Tk 31.25. Balance Tk 72.73. TrxID AAA0000011 at 29/03/2024 21:39",
+            EXPENSE, "2500.00", "VISA Debit Card", null, "72.73", fee = "31.25")
+        check("bKash", "You have received deposit of Tk 200.00 from VISA Card. Fee Tk 0.00. Balance Tk 240.30. TrxID AAA0000012 at 18/04/2023 22:43",
+            INCOME, "200.00", "VISA Card", null, "240.30")
+    }
+
+    @Test
+    fun `notices that duplicate or announce another SMS are not transactions`() {
+        listOf(
+            "bKash" to "Payment of Tk 88.00 is being reserved for SOME MERCHANT-RM0000. Balance Tk 186.62. TrxID AAA0000013 at 24/02/2026 20:29",
+            "bKash" to "Tk 1032.36 will be automatically deducted as Loan instalment today. If already repaid, please ignore this message.",
+            "bKash" to "You have received Loan of Tk 7,000.00 from City Bank in your bKash Account. Your first repayment of TK 2408.85 is due on 10/07/2026.",
+            "bKash" to "Your bKash Mobile Recharge request of Tk 17.00 for 01700000000 was successful. Use bKash App for convenience & offers! TCA",
+            "bKash" to "Your Account Binding request for SOME MERCHANT is successful. You have authorized SOME MERCHANT to debit your account for future purchases.",
+            "EBL" to "Your DESCO  prepaid meter no: 00000000 is successfully recharged with BDT 200, Energy Cost BDT 191.43, VAT BDT 9.52. Your Token Number is",
+            "EBL" to "Your VISA DEBIT CARD has been sent to EBL SOME BRANCH. Pls collect it after 5 working days or ignore, if already collected.",
+        ).forEach { (sender, body) ->
+            val p = BankParserFactory.getParser(sender, body)!!
+            assertEquals(true, p.isNotice(body), body)
+            assertNull(p.parse(body, sender, 0L), body)
+        }
+    }
+
+    @Test
     fun `SimpleDate rejects impossible dates`() {
         assertEquals(SimpleDate(2024, 2, 29), SimpleDate.ofOrNull(2024, 2, 29))
         assertNull(SimpleDate.ofOrNull(2025, 2, 29))

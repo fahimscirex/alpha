@@ -72,6 +72,8 @@ data class TxnRow(
     val number: String,
     val transferOf: Long?,
     val bdtAmount: Long?,
+    /** The linked other half is on the same account: a reversal, not a transfer. */
+    val reversed: Boolean,
 )
 
 /** A transfer candidate: an unlinked transaction plus its account's provider. */
@@ -102,6 +104,15 @@ interface MoneyDao {
     )
     suspend fun transferCandidates(amount: Long, currency: String, accountId: Long, from: Long, to: Long): List<TxnSide>
 
+    /** Unlinked earlier movements on the same account, newest first. */
+    @Query(
+        """SELECT t.id, t.amount, t.merchant, t.timestamp, a.provider FROM Txn t JOIN Account a ON a.id = t.accountId
+           WHERE t.accountId = :accountId AND t.amount = :amount AND t.currency = :currency
+             AND t.transferOf IS NULL AND t.hash NOT LIKE '%:fee' AND t.timestamp BETWEEN :from AND :to
+           ORDER BY t.timestamp DESC"""
+    )
+    suspend fun reversalCandidates(accountId: Long, amount: Long, currency: String, from: Long, to: Long): List<TxnSide>
+
     @Query("UPDATE Txn SET transferOf = CASE id WHEN :a THEN :b ELSE :a END WHERE id IN (:a, :b)")
     suspend fun linkTransfer(a: Long, b: Long)
 
@@ -119,7 +130,8 @@ interface MoneyDao {
     suspend fun insert(sms: UnparsedSms): Long
 
     @Query(
-        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount
+        """SELECT t.id, t.amount, t.currency, t.merchant, t.timestamp, a.provider, a.number, t.transferOf, t.bdtAmount,
+                  COALESCE((SELECT o.accountId FROM Txn o WHERE o.id = t.transferOf) = t.accountId, 0) AS reversed
            FROM Txn t JOIN Account a ON a.id = t.accountId
            WHERE t.timestamp >= :from AND t.timestamp < :to ORDER BY t.timestamp DESC"""
     )

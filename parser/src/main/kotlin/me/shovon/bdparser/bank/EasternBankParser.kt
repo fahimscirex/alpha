@@ -32,6 +32,10 @@ import me.shovon.bdparser.SimpleDate
  * - "Purchase txn USD3.99 from <merchant>.Card <n> on <date> ... Your A/C <n> Balance BDT Y." (foreign
  *   purchase: the amount is in USD, the balance stays in the account's BDT)
  * - "QR txn BDT X through EBL Skybanking at <merchant> from Card <masked> on <date> ..."
+ * - "Cash WD BDTX from <ATM>. Card <n> on <date> ... Your A/C <n> Balance BDT Y." (ATM withdrawal)
+ * - "Payment of BDT X has been credited to beneficiary using Card <masked> on <date> ..."
+ * - "EBL CARDS: Purchase txn USD9.99 from <merchant> reversed using Card <masked>. Ref num ..."
+ *   (reversal of an earlier purchase: income, flagged via [isReversal])
  *
  * The trailing "Balance: BDT Y" is parsed into [me.shovon.bdparser.ParsedTransaction.balance]
  * on BOTH the payment-credited and purchase shapes: real-world reconciliation (credit limit minus
@@ -138,6 +142,33 @@ class EasternBankParser : BangladeshBankParser() {
         RegexOption.IGNORE_CASE
     )
 
+    // "Cash WD BDT2000 from EBL PALLABI MRT ATM . Card <n> on ... Your A/C <n> Balance BDT Y."
+    private val cashWithdrawalPattern = Regex(
+        """Cash WD\s+BDT\s*$takaFigure\s+from\s+(.+?)\s*\.\s*Card\s+[0-9*]+""",
+        RegexOption.IGNORE_CASE
+    )
+
+    // "Payment of BDT X has been credited to beneficiary using Card <masked> on ..."
+    private val cardToBeneficiaryPattern = Regex(
+        """Payment of BDT\s*$takaFigure\s+has been credited to beneficiary using Card\s+[0-9*]+""",
+        RegexOption.IGNORE_CASE
+    )
+
+    // "EBL CARDS: Purchase txn USD9.99 from <merchant> reversed using Card <masked>. Ref num ..."
+    private val cardsReversalPattern = Regex(
+        """${cardsPrefix}Purchase txn\s+([A-Z]{3})\s*$takaFigure\s+from\s+(.+?)\s+reversed using Card\s+[0-9*]+""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val notices = listOf(
+        // The account debit for the same recharge arrives as its own "AC ... is debited" SMS.
+        Regex("""prepaid meter no:.*successfully recharged""", RegexOption.IGNORE_CASE),
+        // "Your VISA DEBIT CARD has been sent to <branch>": card dispatch, no money.
+        Regex("""CARD has been sent to""", RegexOption.IGNORE_CASE),
+    )
+
+    override fun isNotice(message: String): Boolean = notices.any { it.containsMatchIn(message) }
+
     private val cardsBalanceSuffix = Regex(
         """Balance:\s*BDT\s*$takaFigure""",
         RegexOption.IGNORE_CASE
@@ -157,7 +188,8 @@ class EasternBankParser : BangladeshBankParser() {
         val type: TransactionType,
         val merchant: String?,
         val balance: String?,
-        val currency: String = "BDT"
+        val currency: String = "BDT",
+        val reversal: Boolean = false
     )
 
     private fun match(message: String): Match? {
@@ -175,6 +207,17 @@ class EasternBankParser : BangladeshBankParser() {
             }
             val balance = accountBalanceSuffix.find(message)?.groupValues?.get(1)
             return Match(it.groupValues[2], type, merchant, balance)
+        }
+        // Before the purchase pattern: a reversal also starts with "Purchase txn".
+        cardsReversalPattern.find(message)?.let {
+            val merchant = it.groupValues[3].trim()
+            return Match(it.groupValues[2], TransactionType.INCOME, merchant, null, it.groupValues[1].uppercase(), reversal = true)
+        }
+        cashWithdrawalPattern.find(message)?.let {
+            return Match(it.groupValues[1], TransactionType.EXPENSE, "Cash withdrawal", cardBalance(message))
+        }
+        cardToBeneficiaryPattern.find(message)?.let {
+            return Match(it.groupValues[1], TransactionType.EXPENSE, "Card transfer", null)
         }
         cardsNpsbPattern.find(message)?.let {
             return Match(it.groupValues[1], TransactionType.EXPENSE, "NPSB Fund Transfer", null)
@@ -215,6 +258,8 @@ class EasternBankParser : BangladeshBankParser() {
     override fun extractTransactionType(message: String): TransactionType? = match(message)?.type
 
     override fun extractCurrency(message: String): String? = match(message)?.currency
+
+    override fun isReversal(message: String): Boolean = match(message)?.reversal == true
 
     override fun extractMerchant(message: String, sender: String): String? = match(message)?.merchant
 

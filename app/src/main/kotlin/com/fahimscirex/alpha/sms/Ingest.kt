@@ -21,13 +21,20 @@ object Ingest {
     suspend fun sms(dao: MoneyDao, sender: String, body: String, timestamp: Long) = lock.withLock {
         val parser = BankParserFactory.getParser(sender, body) ?: return@withLock
         // Card statements and balance-only notices: handled once cards exist (v2).
-        if (parser.isBalanceUpdateNotification(body)) return@withLock
+        if (parser.isBalanceUpdateNotification(body) || parser.isNotice(body)) return@withLock
 
         val t = parser.parse(body, sender, timestamp)
         if (t == null) {
-            if (SmsFilter.isTransactionMessage(body)) dao.insert(UnparsedSms(sender = sender, body = body, timestamp = timestamp))
+            // Only from the provider's own sender: a body-only match ("pay through bKash" in an
+            // ISP bill reminder) that fails to parse is just someone else's SMS.
+            if (parser.canHandle(sender) && SmsFilter.isTransactionMessage(body)) {
+                dao.insert(UnparsedSms(sender = sender, body = body, timestamp = timestamp))
+            }
             return@withLock
         }
+
+        // "Purchase txn BDT 0 / USD0" card verification checks move no money.
+        if (t.amount.signum() == 0) return@withLock
 
         val sign = when (t.type) {
             TransactionType.INCOME -> 1
@@ -47,7 +54,9 @@ object Ingest {
             merchant = t.merchant, timestamp = timestamp, source = "SMS",
             bdtAmount = if (t.currency != account.currency) takaCost(account, t.balance, timestamp, sign) else null)
         val id = dao.insert(txn)
-        if (id > 0) linkTransfer(dao, txn.copy(id = id), account.provider)
+        if (id > 0) {
+            if (t.isReversal) linkReversal(dao, txn.copy(id = id)) else linkTransfer(dao, txn.copy(id = id), account.provider)
+        }
         t.fee?.let {
             dao.insert(Txn(hash = "$hash:fee", accountId = account.id, amount = -minor(it), currency = t.currency,
                 merchant = "${t.bankName} fee", timestamp = timestamp, source = "SMS"))
@@ -88,7 +97,7 @@ object Ingest {
 
     /**
      * Finds the provider's account row by number suffix, since one bank shows the same account
-     * as "134***982" in one SMS and "1343982" in another (parsed as "982" and "3982").
+     * as "123***456" in one SMS and "1230456" in another (parsed as "456" and "0456").
      * An exact match wins over a suffix match.
      */
     private suspend fun findRow(dao: MoneyDao, provider: String, number: String, currency: String): Account? {
@@ -117,13 +126,41 @@ object Ingest {
     private suspend fun linkTransfer(dao: MoneyDao, txn: Txn, provider: String) {
         val match = dao.transferCandidates(-txn.amount, txn.currency, txn.accountId,
             txn.timestamp - TRANSFER_WINDOW_MS, txn.timestamp + TRANSFER_WINDOW_MS)
-            .filter { names(txn.merchant, it.provider) && names(it.merchant, provider) }
+            .filter { counterparts(txn.merchant, provider, it.merchant, it.provider) }
             .minByOrNull { kotlin.math.abs(it.timestamp - txn.timestamp) } ?: return
         dao.linkTransfer(txn.id, match.id)
     }
 
+    /**
+     * Each side must name the other's provider, except that a card top-up may name only the
+     * card network on one side: EBL "Purchase txn ... from BKASH LIMITED" pairs with bKash
+     * "deposit ... from VISA Card". At least one side still has to name the other provider.
+     */
+    internal fun counterparts(aMerchant: String?, aProvider: String, bMerchant: String?, bProvider: String): Boolean {
+        val aNamesB = names(aMerchant, bProvider)
+        val bNamesA = names(bMerchant, aProvider)
+        return (aNamesB || bNamesA) && (aNamesB || isCard(aMerchant)) && (bNamesA || isCard(bMerchant))
+    }
+
     /** "Eastern Bank PLC" names "Eastern Bank"; "bKash" names "bKash". */
-    internal fun names(merchant: String?, provider: String) = merchant?.contains(provider, ignoreCase = true) == true
+    private fun names(merchant: String?, provider: String) = merchant?.contains(provider, ignoreCase = true) == true
+
+    private fun isCard(merchant: String?) = merchant?.contains("card", ignoreCase = true) == true
+
+    /**
+     * Pairs a card reversal with the purchase it undoes (same account, currency and amount,
+     * within [REVERSAL_WINDOW_MS] before it), preferring one whose merchant starts the same.
+     * The pair then cancels out of spending. Without a match the reversal stays as income.
+     */
+    private suspend fun linkReversal(dao: MoneyDao, txn: Txn) {
+        val prefix = txn.merchant.orEmpty().take(6)
+        val candidates = dao.reversalCandidates(txn.accountId, -txn.amount, txn.currency, txn.timestamp - REVERSAL_WINDOW_MS, txn.timestamp)
+        val match = candidates.firstOrNull { prefix.isNotEmpty() && it.merchant.orEmpty().startsWith(prefix, ignoreCase = true) }
+            ?: candidates.firstOrNull() ?: return
+        dao.linkTransfer(txn.id, match.id)
+    }
+
+    private const val REVERSAL_WINDOW_MS = 60 * 86_400_000L
 
     private const val TRANSFER_WINDOW_MS = 15 * 60_000L
 

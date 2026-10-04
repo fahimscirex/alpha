@@ -177,6 +177,7 @@ abstract class BankParser {
             currency = extractCurrency(smsBody) ?: getCurrency(),
             fee = extractFee(smsBody)?.takeIf { it.signum() > 0 },
             cardLast4 = extractLinkedCardLast4(smsBody),
+            isReversal = isReversal(smsBody),
             creditCardBalanceIsAvailableCredit = creditCardBalanceIsAvailableCredit()
         )
     }
@@ -189,6 +190,16 @@ abstract class BankParser {
      */
     /** Currency of the amount for formats that state it per message; null means [getCurrency]. */
     protected open fun extractCurrency(message: String): String? = null
+
+    /**
+     * True for informational SMS that look like transactions but move no money themselves,
+     * usually because another SMS records the same movement. Callers drop these silently
+     * instead of keeping them as unparsed.
+     */
+    open fun isNotice(message: String): Boolean = false
+
+    /** True when the message reverses an earlier transaction. */
+    protected open fun isReversal(message: String): Boolean = false
 
     /** Card digits for SMS that name a card alongside the account in [extractAccountLast4]. */
     protected open fun extractLinkedCardLast4(message: String): String? = null
@@ -445,7 +456,7 @@ abstract class BankParser {
     /**
      * Extracts last 4 digits from a raw captured string.
      * Filters to digits only, takes last 4. Returns null if fewer than 3 digits.
-     * Only digits after the last mask character count: "134***982" is "982", not "4982".
+     * Only digits after the last mask character count: "123***456" is "456", not "3456".
      */
     protected fun extractLast4Digits(raw: String): String? {
         val digits = raw.substringAfterLast('*').substringAfterLast('X').substringAfterLast('x')

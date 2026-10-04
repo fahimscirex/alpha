@@ -36,6 +36,8 @@ data class ParsedTransaction(
     val fee: BigDecimal? = null,
     /** Card digits when the SMS names both a card and the account it debits; null otherwise. */
     val cardLast4: String? = null,
+    /** True when this undoes an earlier transaction of the same amount (a card reversal). */
+    val isReversal: Boolean = false,
     /**
      * True when [balance] - as reported by a regular (non-statement) card transaction SMS -
      * represents the card's remaining AVAILABLE CREDIT rather than the outstanding amount owed.

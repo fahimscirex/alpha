@@ -426,18 +426,26 @@ class BkashParserTest {
             ),
 
             // ------------------------------------------------------------
-            // FORMAT 9 - Mobile Recharge (no Fee/Balance/TrxID trailer at all; trailing
-            //            promotional-sounding app footer must NOT be rejected as promo)
+            // FORMAT 9 - Mobile Recharge. bKash sends the receipt ("Received Recharge request
+            //            ... TrxID") and seconds later a "... was successful" notice with no
+            //            TrxID; in a real inbox every notice followed a receipt, so only the
+            //            receipt is a transaction (the notice would double-count it).
             // ------------------------------------------------------------
             ParserTestCase(
-                name = "Format - Mobile Recharge with promotional app footer is still parsed",
-                message = "Your bKash Mobile Recharge request of Tk 500.00 for ending 1234 was successful. Use bKash App for convenience & offers! TCA",
+                name = "Format - Mobile Recharge receipt is parsed",
+                message = "Received Recharge request of Tk 500.00 for 01XXXXXXXXX. Fee Tk 0.00. Balance Tk 1,000.00. TrxID ABC1234567 at 01/01/2024 10:00. Wait for confirmation.",
                 sender = "bKash",
                 expected = ExpectedTransaction(
                     amount = BigDecimal("500.00"),
                     currency = "BDT",
                     type = TransactionType.EXPENSE
                 )
+            ),
+            ParserTestCase(
+                name = "Ignored - Mobile Recharge success notice duplicates the receipt",
+                message = "Your bKash Mobile Recharge request of Tk 500.00 for ending 1234 was successful. Use bKash App for convenience & offers! TCA",
+                sender = "bKash",
+                shouldParse = false
             ),
             // A genuine promotional message using the same "offer" word (singular, standalone)
             // must still be rejected - proves the app-footer fix did not weaken promo detection.

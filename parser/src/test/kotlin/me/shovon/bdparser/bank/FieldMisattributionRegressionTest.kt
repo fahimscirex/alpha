@@ -40,8 +40,8 @@ class FieldMisattributionRegressionTest {
      */
     @Test
     fun `bKash mobile recharge receipt is not a card transaction`() {
-        val message = "Your bKash Mobile Recharge request of Tk 500.00 for ending 1234 was " +
-            "successful. Use bKash App for convenience & offers! TCA"
+        val message = "Received Recharge request of Tk 500.00 for 01XXXXXXXXX. Fee Tk 0.00. " +
+            "Balance Tk 1,000.00. TrxID ABC1234567 at 01/01/2024 10:00. Wait for confirmation."
 
         val parsed = BkashParser().parse(message, "bKash", 0L)
 

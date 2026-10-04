@@ -66,6 +66,37 @@ class IngestTest {
     }
 
     @Test
+    fun `card reversal cancels its purchase and zero-amount checks are skipped`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "EBL", "Purchase txn BDT 0 from GOOGLE *TEMPORARY .Card 452017**0001 on 21-Jun-23 11:16:25 AM BST.Your A/C 123**0456 Balance BDT 5248.77. EBL Helpline 16230", 1 * min)
+        Ingest.sms(dao, "EBL", "Purchase txn BDT 80 from GOOGLE *TEMPORARY .Card 452017**0001 on 07-Nov-23 01:46:24 AM BST.Your A/C 123**0456 Balance BDT 5168.77. EBL Helpline 16230", 2 * min)
+        Ingest.sms(dao, "EBL", "EBL CARDS: Purchase txn BDT80 from GOOGLE *TEMPORARY HOLD g. reversed using Card 452017**0001. Ref num 145901843. EBL Helpline 16230", 3 * min)
+
+        assertEquals(2, dao.txns.size)
+        val (purchase, reversal) = dao.txns
+        assertEquals(reversal.id, purchase.transferOf)
+        assertEquals(purchase.accountId, reversal.accountId)
+        assertEquals(0L, dao.spent())
+    }
+
+    @Test
+    fun `EBL card top-up of bKash links with the bKash card deposit`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "EBL", "Purchase txn BDT 200 from BKASH LIMITED 01 B.Card 452017**0001 on 18-Apr-23 10:43:01 PM BST.Your A/C 123**0456 Balance BDT 5000.00. EBL Helpline 16230", 1 * min)
+        Ingest.sms(dao, "bKash", "You have received deposit of Tk 200.00 from VISA Card. Fee Tk 0.00. Balance Tk 240.30. TrxID AAA0000012 at 18/04/2023 22:43", 2 * min)
+        assertEquals(dao.txns[1].id, dao.txns[0].transferOf)
+        assertEquals(0L, dao.spent())
+    }
+
+    @Test
+    fun `notices are dropped without becoming unparsed`() = runBlocking {
+        val dao = FakeDao()
+        Ingest.sms(dao, "bKash", "Payment of Tk 88.00 is being reserved for SOME MERCHANT-RM0000. Balance Tk 186.62. TrxID AAA0000013 at 24/02/2026 20:29", min)
+        assertEquals(0, dao.txns.size)
+        assertEquals(0, dao.unparsed.size)
+    }
+
+    @Test
     fun `bKash fee is a separate expense`() = runBlocking {
         val dao = FakeDao()
         Ingest.sms(dao, "bKash", "Send Money Tk 500.00 to 01800000000 successful. Ref 1. Fee Tk 5.00. Balance Tk 745.28. TrxID AAA0000005 at 03/02/2026 17:18", min)
@@ -73,7 +104,7 @@ class IngestTest {
     }
 }
 
-private class FakeDao : MoneyDao {
+internal class FakeDao : MoneyDao {
     val accounts = mutableListOf<Account>()
     val txns = mutableListOf<Txn>()
     val unparsed = mutableListOf<UnparsedSms>()
@@ -103,6 +134,12 @@ private class FakeDao : MoneyDao {
             it.amount == amount && it.currency == currency && it.accountId != accountId &&
                 it.transferOf == null && !it.hash.endsWith(":fee") && it.timestamp in from..to
         }.map { TxnSide(it.id, it.amount, it.merchant, it.timestamp, account(it.accountId).provider) }
+    override suspend fun reversalCandidates(accountId: Long, amount: Long, currency: String, from: Long, to: Long) =
+        txns.filter {
+            it.accountId == accountId && it.amount == amount && it.currency == currency &&
+                it.transferOf == null && !it.hash.endsWith(":fee") && it.timestamp in from..to
+        }.sortedByDescending { it.timestamp }
+            .map { TxnSide(it.id, it.amount, it.merchant, it.timestamp, account(it.accountId).provider) }
     override suspend fun linkTransfer(a: Long, b: Long) {
         txns.replaceAll { when (it.id) { a -> it.copy(transferOf = b); b -> it.copy(transferOf = a); else -> it } }
     }

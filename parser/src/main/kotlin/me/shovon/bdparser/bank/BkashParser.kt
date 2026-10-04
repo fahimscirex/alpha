@@ -10,6 +10,8 @@
  */
 package me.shovon.bdparser.bank
 
+import me.shovon.bdparser.TransactionType
+
 /**
  * Parser for bKash (Bangladesh) mobile financial service SMS messages.
  *
@@ -53,6 +55,7 @@ package me.shovon.bdparser.bank
  * Currency: BDT (Bangladeshi Taka)
  */
 class BkashParser : BangladeshMfsParser() {
+
 
     override fun getBankName() = "bKash"
 
@@ -142,7 +145,58 @@ class BkashParser : BangladeshMfsParser() {
         RegexOption.IGNORE_CASE
     )
 
+    // ------------------------------------------------------------------
+    // Shapes the keyword heuristics in BangladeshMfsParser get wrong, found in a real inbox
+    // ------------------------------------------------------------------
+
+    private fun regex(p: String) = Regex(p, RegexOption.IGNORE_CASE)
+
+    /** Repeat or announce a movement that another SMS (with its own TrxID) records. */
+    private val notices = listOf(
+        regex("""is being reserved for"""),            // then "Payment ... successful", same TrxID
+        regex("""will be automatically deducted"""),   // loan instalment reminder
+        regex("""You have received Loan of"""),        // then "You have received Digital Loan ... TrxID"
+        regex("""Mobile Recharge request of .*was successful"""), // after "Received Recharge request ... TrxID"
+        regex("""Account Binding"""),                  // authorises future direct debits; moves nothing
+    )
+
+    /** Money in, whatever later words ("Send Money", "Cash Out") say about the original action. */
+    private val incomeShapes = listOf(
+        regex("""^\s*You have received"""),
+        regex("""^\s*Cash In\b"""),
+        regex("""Remittance fund withdrawal from"""),  // Payoneer etc. into bKash
+        regex("""returned to your bKash Account"""),   // failed recharge refunded
+        regex("""Interest peyechhen"""),
+    )
+
+    private val bkashToBankPattern = regex("""^\s*bKash to Bank of\s+Tk\s*[0-9,.]+\s+for\s+(.+?)\s+is successful""")
+    private val remittanceSourcePattern = regex("""Remittance fund withdrawal from\s+(\S+)\s+account""")
+    private val cardDepositSourcePattern = regex("""deposit of\s+Tk\s*[0-9,.]+\s+from\s+([A-Za-z][^.\n]*?)\.""")
+
+    override fun isNotice(message: String): Boolean = notices.any { it.containsMatchIn(message) }
+
+    override fun isTransactionMessage(message: String): Boolean {
+        if (isNotice(message)) return false
+        // Checked before the base filter, which rejects "failed" even when money came back.
+        if (incomeShapes.any { it.containsMatchIn(message) }) return true
+        if (bkashToBankPattern.containsMatchIn(message)) return true
+        return super.isTransactionMessage(message)
+    }
+
+    override fun extractTransactionType(message: String): TransactionType? {
+        if (incomeShapes.any { it.containsMatchIn(message) }) return TransactionType.INCOME
+        if (bkashToBankPattern.containsMatchIn(message)) return TransactionType.EXPENSE
+        return super.extractTransactionType(message)
+    }
+
     override fun extractMerchant(message: String, sender: String): String? {
+        remittanceSourcePattern.find(message)?.let { return it.groupValues[1] }
+        if (message.contains("received remittance", ignoreCase = true)) return "Remittance"
+        bkashToBankPattern.find(message)?.let { return it.groupValues[1].trim() }
+        cardDepositSourcePattern.find(message)?.let { return it.groupValues[1].trim() }
+        if (message.contains("Interest peyechhen", ignoreCase = true)) return "Interest"
+        if (message.contains("Recharge request", ignoreCase = true)) return "Mobile Recharge"
+        if (message.contains("Cashback on", ignoreCase = true)) return "Cashback"
         cashbackForPattern.find(message)?.let { match ->
             return "Cashback for ${match.groupValues[1].trim()}"
         }
